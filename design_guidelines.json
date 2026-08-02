@@ -1,0 +1,102 @@
+{
+  "theme": "Light mode primary, with dark high-contrast structural elements (sidebar/header). Industrial, high-visibility aesthetic.",
+  "typography": {
+    "headings": {
+      "family": "Barlow Condensed",
+      "weights": ["600", "700", "900"],
+      "description": "Used for all page titles, card headers, and large metric labels. Gives a sturdy, heavy-duty industrial feel.",
+      "classes": "font-sans uppercase tracking-tight"
+    },
+    "body": {
+      "family": "IBM Plex Sans",
+      "weights": ["400", "500"],
+      "description": "Used for standard text, instructions, and list items."
+    },
+    "data": {
+      "family": "IBM Plex Mono",
+      "weights": ["400", "600"],
+      "description": "Used for numbers, rates, box counts, and monetary values.",
+      "classes": "font-mono tracking-tight"
+    }
+  },
+  "colors": {
+    "background": "#F4F4F5",
+    "surface": "#FFFFFF",
+    "sidebar_header": "#09090B",
+    "primary": "#EAB308",
+    "primary_hover": "#CA8A04",
+    "primary_text_on_bg": "#18181B",
+    "secondary": "#2563EB",
+    "text_main": "#18181B",
+    "text_muted": "#71717A",
+    "border": "#E4E4E7",
+    "success": "#16A34A",
+    "warning": "#F59E0B",
+    "danger": "#DC2626",
+    "archetype": "Swiss & High-Contrast mixed with Performance Pro (Industrial)"
+  },
+  "visual_enhancers": {
+    "borders": "Use strict 1px solid borders (`border-zinc-200` or `border-zinc-300`). No soft drop shadows for cards, use sharp structural lines instead.",
+    "shadows": "Minimal. Use hard shadows if necessary, e.g., `shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]` for primary action buttons to make them tactile and 'machine-like'.",
+    "radius": "Keep it sharp. Use `rounded-none` or `rounded-sm`. Avoid pills and heavy rounding.",
+    "textures": "Subtle noise or diagonal hatch patterns on dark headers to feel like grip tape or industrial flooring."
+  },
+  "layouts": {
+    "dashboard_grid": "High-density Grid (Mode B). Use `grid-cols-1 md:grid-cols-3 lg:grid-cols-4` with tight gaps (`gap-4` or `gap-6`).",
+    "spacing": "Generous internal padding for cards (`p-6` or `p-8`) to prevent text collision, but tight margins between grid items.",
+    "alignment": "Left-align forms and dense data. Top-row KPI cards should use a vertical stack: Title (top left), massive number (bottom left)."
+  },
+  "components": {
+    "cards": "Flat background, 1px solid border (`border-zinc-300`), sharp corners (`rounded-none`). No shadow by default.",
+    "buttons": {
+      "primary": "Safety Yellow background, Black text, sharp corners. On hover: darken yellow, maybe a slight translation with hard shadow. Must be highly visible.",
+      "secondary": "Outline button with thick border (`border-2 border-zinc-900`), black text. On hover: `bg-zinc-100`."
+    },
+    "tables": "Dense. Use Shadcn Table. `IBM Plex Mono` for numeric columns. Zebra striping (`odd:bg-zinc-50`) helps readability for long lists.",
+    "inputs": "Shadcn inputs, but force sharp corners (`rounded-none`) and thick focus rings (`focus:ring-2 focus:ring-yellow-500 focus:border-transparent`).",
+    "alerts": "Use Shadcn Alert, but style with high-contrast colors (e.g., Red bg with White text for errors)."
+  },
+  "motion": {
+    "transitions": "Snappy and mechanical. `transition-all duration-150 ease-out`.",
+    "hover_states": "High contrast shifts. E.g., text color changes on hover, or background goes from white to solid black with white text."
+  },
+  "accessibility": {
+    "contrast": "Ensure text meets WCAG AA. Black text on Safety Yellow is highly accessible. Avoid light grey text on white.",
+    "focus": "Clear, thick focus rings for keyboard navigation.",
+    "test_attributes": "All interactive and key informational elements MUST include a `data-testid` attribute (e.g., `data-testid=\"report-box-submit\"`)."
+  },
+  "media": {
+    "image_urls": [
+      {
+        "url": "https://images.pexels.com/photos/4487383/pexels-photo-4487383.jpeg",
+        "description": "Warehouse workers handling boxes. Use as a background image for the login screen, with a heavy dark or yellow overlay.",
+        "category": "backgrounds"
+      }
+    ],
+    "icons": "Use Phosphor Icons (sharp/bold variants) or Heroicons for a clean, utilitarian look. Install via `yarn add @phosphor-icons/react` or `yarn add @heroicons/react`."
+  },
+  "instructions_to_main_agent": [
+    "Build a Dashboard for Admin and a separate View/Dashboard for Workers.",
+    "For the Login screen, use the provided warehouse image with a dark overlay (`bg-zinc-950/80`) and a high-contrast login card.",
+    "Use 'Barlow Condensed' for all headings and KPI numbers.",
+    "Use 'IBM Plex Mono' for all data, rates, box counts, and money.",
+    "Admin Dashboard: Show Global Rate setter, total boxes processed this week, and a dense table of workers with PDF export buttons.",
+    "Worker Dashboard: Form to report boxes (daily), and a summary of their own weekly totals.",
+    "Avoid Shadcn defaults where they conflict: replace rounded corners with `rounded-none`, and use sharp, high-contrast borders.",
+    "Avoid all purple/AI-slop gradients. Use solid colors: Zinc-950, Zinc-100, White, and Yellow-500."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. In frontend design, this creates what users call the 'AI slop' aesthetic. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "Don't make generic centered layouts, simplistic gradients, and uniform styling.",
+    "Create depth through layered design elements with z-index hierarchy and sharp borders.",
+    "Use solid industrial colors. DO NOT use dark colors as gradients.",
+    "You MUST NOT apply universal transition. Eg: `transition: all`. Always add transitions for specific interactive elements.",
+    "You MUST NOT center align the app container, ie do not add `.App { text-align: center; }` in the css file.",
+    "Always use modern button styles like sharp utilitarian buttons with interaction animations & color relevant to the app style.",
+    "NEVER use AI assistant Emoji characters like 🤖🧠💭💡🔮🎯 etc for icons.",
+    "Every interaction needs micro-animations - hover states, transitions.",
+    "Use generous spacing for padding inside containers, but keep grids dense.",
+    "Prioritize using pre-existing components from src/components/ui when applicable.",
+    "Use `sonner` for toasts located in `/app/src/components/ui/sonner.js` (Note: use .js extension, not .tsx)."
+  ]
+}
