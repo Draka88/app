@@ -3,6 +3,16 @@ import { api, API, formatApiError } from "../lib/api";
 import { fmtAUD, fmtInt, isoWeekKey } from "../lib/format";
 import Layout from "../components/Layout";
 import { toast } from "sonner";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  Cell,
+  LabelList,
+} from "recharts";
 
 const ALL = "__all__";
 const UNASSIGNED = "__unassigned__";
@@ -79,6 +89,69 @@ export default function AdminPayroll() {
 
   const filterActive = roleFilter !== ALL;
 
+  const exportCSV = () => {
+    if (!filteredRows.length) {
+      toast.error("Nothing to export");
+      return;
+    }
+    const esc = (v) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["Worker", "Role", "Email", "Boxes", "Rate (AUD)", "Earnings (AUD)"];
+    const lines = [header.join(",")];
+    filteredRows.forEach((r) => {
+      lines.push([
+        esc(r.name),
+        esc(r.job_role || ""),
+        esc(r.email),
+        r.boxes,
+        rate.toFixed(2),
+        r.earnings.toFixed(2),
+      ].join(","));
+    });
+    lines.push([
+      esc(filterActive ? `${roleFilter === UNASSIGNED ? "Unassigned" : roleFilter} Subtotal` : "Total"),
+      "",
+      "",
+      totals.boxes,
+      rate.toFixed(2),
+      totals.earnings.toFixed(2),
+    ].join(","));
+    const meta = [
+      `# Boxwise Payroll · Week ${week} (${payroll?.week_start} to ${payroll?.week_end})`,
+      `# Filter: ${filterActive ? (roleFilter === UNASSIGNED ? "Unassigned" : roleFilter) : "All roles"}`,
+      `# Rate per box (AUD): ${rate.toFixed(2)}`,
+      "",
+    ].join("\n");
+    const blob = new Blob([meta + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    const objUrl = URL.createObjectURL(blob);
+    const scope = filterActive
+      ? `_${(roleFilter === UNASSIGNED ? "unassigned" : roleFilter).toLowerCase().replace(/\s+/g, "-")}`
+      : "";
+    a.href = objUrl;
+    a.download = `payroll_${week}${scope}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objUrl);
+    toast.success("CSV downloaded");
+  };
+
+  const chartData = useMemo(
+    () =>
+      filteredRows
+        .filter((r) => r.boxes > 0)
+        .map((r) => ({
+          name: r.name,
+          role: r.job_role || "Unassigned",
+          boxes: r.boxes,
+          earnings: r.earnings,
+        })),
+    [filteredRows]
+  );
+
   return (
     <Layout>
       <div className="flex items-end justify-between mb-8 gap-4 flex-wrap">
@@ -120,6 +193,14 @@ export default function AdminPayroll() {
               ))}
             </select>
           </div>
+          <button
+            onClick={exportCSV}
+            className="btn-outline-ink px-4 py-[10px] text-xs h-[42px]"
+            data-testid="export-csv-button"
+            title="Download filtered payroll as CSV"
+          >
+            ↓ CSV
+          </button>
         </div>
       </div>
 
@@ -165,6 +246,89 @@ export default function AdminPayroll() {
           </button>
         </div>
       )}
+
+      <div className="card-sharp p-6 mb-6" data-testid="chart-card">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <div>
+            <h2 className="font-heading text-2xl">Boxes per worker</h2>
+            <p className="text-xs text-zinc-500">
+              {filterActive
+                ? `Filtered · ${roleFilter === UNASSIGNED ? "Unassigned" : roleFilter}`
+                : "Ranked by boxes processed this week"}
+            </p>
+          </div>
+          {chartData.length > 0 && (
+            <div className="font-mono-data text-xs text-zinc-600">
+              Top:{" "}
+              <span className="font-bold text-zinc-950">
+                {chartData.slice().sort((a, b) => b.boxes - a.boxes)[0].name}
+              </span>{" "}
+              · {fmtInt(chartData.slice().sort((a, b) => b.boxes - a.boxes)[0].boxes)} boxes
+            </div>
+          )}
+        </div>
+        {chartData.length === 0 ? (
+          <div className="py-14 text-center text-zinc-500 text-sm border border-dashed border-zinc-300">
+            No boxes reported yet for this view.
+          </div>
+        ) : (
+          <div className="w-full" style={{ height: 260 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={chartData.slice().sort((a, b) => b.boxes - a.boxes)}
+                margin={{ top: 20, right: 20, left: 0, bottom: 10 }}
+              >
+                <XAxis
+                  dataKey="name"
+                  tick={{ fontSize: 11, fill: "#09090b", fontFamily: "IBM Plex Mono" }}
+                  axisLine={{ stroke: "#09090b" }}
+                  tickLine={{ stroke: "#09090b" }}
+                  interval={0}
+                />
+                <YAxis
+                  tick={{ fontSize: 11, fill: "#71717a", fontFamily: "IBM Plex Mono" }}
+                  axisLine={{ stroke: "#09090b" }}
+                  tickLine={{ stroke: "#09090b" }}
+                  allowDecimals={false}
+                />
+                <Tooltip
+                  cursor={{ fill: "rgba(234,179,8,0.15)" }}
+                  contentStyle={{
+                    background: "#09090b",
+                    border: "none",
+                    borderRadius: 0,
+                    color: "#fff",
+                    fontFamily: "IBM Plex Mono",
+                    fontSize: 12,
+                  }}
+                  labelStyle={{ color: "#eab308", fontWeight: 700 }}
+                  formatter={(v, k) =>
+                    k === "boxes" ? [fmtInt(v), "Boxes"] : [fmtAUD(v), "Earnings"]
+                  }
+                />
+                <Bar dataKey="boxes" fill="#eab308" isAnimationActive={false}>
+                  {chartData
+                    .slice()
+                    .sort((a, b) => b.boxes - a.boxes)
+                    .map((_, i) => (
+                      <Cell key={i} fill={i === 0 ? "#09090b" : "#eab308"} />
+                    ))}
+                  <LabelList
+                    dataKey="boxes"
+                    position="top"
+                    style={{
+                      fill: "#09090b",
+                      fontFamily: "IBM Plex Mono",
+                      fontSize: 12,
+                      fontWeight: 700,
+                    }}
+                  />
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
 
       <div className="card-sharp p-6">
         <div className="flex items-center justify-between mb-4">
