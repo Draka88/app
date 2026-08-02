@@ -252,11 +252,18 @@ export default function WorkerDashboard() {
                     <tr><td colSpan={4} className="px-3 py-8 text-center text-zinc-500 text-xs">No scans yet. Start the scanner to log your first box.</td></tr>
                   )}
                   {scans.map((s) => (
-                    <tr key={s.id} className="border-t border-zinc-100" data-testid={`scan-row-${s.id}`}>
+                    <tr key={s.id} className={`border-t border-zinc-100 ${s.suspicious ? "bg-red-50" : ""}`} data-testid={`scan-row-${s.id}`}>
                       <td className="px-3 py-2 font-mono-data text-xs whitespace-nowrap">
                         {new Date(s.created_at).toLocaleTimeString()}
                       </td>
-                      <td className="px-3 py-2 font-mono-data text-xs break-all">{s.barcode}</td>
+                      <td className="px-3 py-2 font-mono-data text-xs break-all">
+                        {s.barcode}
+                        {s.suspicious && (
+                          <span className="ml-2 text-[9px] uppercase tracking-widest bg-red-600 text-white px-1.5 py-0.5 font-bold" title={s.suspicious_reason || "flagged"}>
+                            !
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2 font-mono-data text-xs">{s.date}</td>
                       <td className="px-3 py-2 text-right font-mono-data font-bold">+{s.boxes}</td>
                     </tr>

@@ -104,6 +104,11 @@ class ScanIn(BaseModel):
     barcode: str = Field(min_length=1, max_length=200)
     format: Optional[str] = None  # e.g. "CODE_128", "EAN_13", "QR_CODE"
 
+class WhitelistIn(BaseModel):
+    date: str
+    barcodes: List[str]
+    replace: bool = False
+
 class BoxReportOut(BaseModel):
     id: str
     worker_id: str
@@ -314,16 +319,28 @@ async def create_scan(body: ScanIn, user: dict = Depends(get_current_user)):
     if dup:
         raise HTTPException(status_code=409, detail="Duplicate scan — same barcode within 10 seconds")
     today = date.today()
+    today_s = today.isoformat()
+    # Whitelist enforcement (soft): if a whitelist exists for today, mark scans not in it as suspicious
+    suspicious = False
+    reason = None
+    wl_count = await db.whitelist.count_documents({"date": today_s})
+    if wl_count > 0:
+        match = await db.whitelist.find_one({"date": today_s, "barcode": barcode})
+        if not match:
+            suspicious = True
+            reason = "not-in-whitelist"
     doc = {
         "id": str(uuid.uuid4()),
         "worker_id": user["id"],
         "worker_name": user["name"],
-        "date": today.isoformat(),
+        "date": today_s,
         "boxes": 1,
         "barcode": barcode,
         "barcode_format": body.format,
         "source": "scan",
         "note": None,
+        "suspicious": suspicious,
+        "suspicious_reason": reason,
         "week_key": iso_week_key(today),
         "month_key": month_key(today),
         "created_at": now.isoformat(),
@@ -331,6 +348,74 @@ async def create_scan(body: ScanIn, user: dict = Depends(get_current_user)):
     await db.reports.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+# ---------- Whitelist ----------
+@api.post("/whitelist")
+async def upload_whitelist(body: WhitelistIn, user: dict = Depends(require_admin)):
+    try:
+        date.fromisoformat(body.date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    # Clean list: strip, dedupe, drop empties
+    seen = set()
+    cleaned = []
+    for b in body.barcodes:
+        b = (b or "").strip()
+        if not b or b in seen:
+            continue
+        seen.add(b)
+        cleaned.append(b)
+    if body.replace:
+        await db.whitelist.delete_many({"date": body.date})
+    now_s = datetime.now(timezone.utc).isoformat()
+    if cleaned:
+        # Bulk upsert
+        ops = []
+        for b in cleaned:
+            ops.append({
+                "date": body.date,
+                "barcode": b,
+                "uploaded_by": user["email"],
+                "uploaded_at": now_s,
+            })
+        # Ensure no duplicates against existing
+        existing = await db.whitelist.distinct("barcode", {"date": body.date})
+        to_insert = [d for d in ops if d["barcode"] not in existing]
+        if to_insert:
+            await db.whitelist.insert_many(to_insert)
+    total = await db.whitelist.count_documents({"date": body.date})
+    return {
+        "date": body.date,
+        "added": len(cleaned) if body.replace else max(0, total - len(await db.whitelist.distinct("barcode", {"date": body.date, "barcode": {"$in": list(seen)}}))),
+        "requested": len(cleaned),
+        "total": total,
+    }
+
+@api.get("/whitelist")
+async def list_whitelist(date_: str = "", _: dict = Depends(require_admin)):
+    if not date_:
+        date_ = date.today().isoformat()
+    rows = await db.whitelist.find({"date": date_}, {"_id": 0}).sort("barcode", 1).to_list(10000)
+    return {"date": date_, "total": len(rows), "barcodes": rows}
+
+@api.delete("/whitelist")
+async def clear_whitelist(date_: str, _: dict = Depends(require_admin)):
+    res = await db.whitelist.delete_many({"date": date_})
+    return {"deleted": res.deleted_count, "date": date_}
+
+@api.get("/whitelist/dates")
+async def whitelist_dates(_: dict = Depends(require_admin)):
+    dates = await db.whitelist.distinct("date")
+    dates.sort(reverse=True)
+    return {"dates": dates}
+
+@api.get("/scans/suspicious")
+async def suspicious_scans(limit: int = 100, _: dict = Depends(require_admin)):
+    rows = await db.reports.find(
+        {"source": "scan", "suspicious": True},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(max(1, min(500, int(limit))))
+    return rows
 
 @api.get("/scans/me")
 async def my_scans(limit: int = 100, user: dict = Depends(get_current_user)):
@@ -827,6 +912,7 @@ async def startup():
     await db.reports.create_index([("worker_id", 1), ("barcode", 1), ("created_at", -1)])
     await db.reports.create_index([("source", 1), ("created_at", -1)])
     await db.reports.create_index("id", unique=True)
+    await db.whitelist.create_index([("date", 1), ("barcode", 1)], unique=True)
 
     # Backfill month_key + source for legacy rows (idempotent)
     async for r in db.reports.find({"month_key": {"$exists": False}}):

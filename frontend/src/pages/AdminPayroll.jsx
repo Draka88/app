@@ -312,10 +312,19 @@ export default function AdminPayroll() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-[240px] overflow-y-auto pr-1">
             {recentScans.map((s) => (
-              <div key={s.id} className="border border-zinc-200 bg-white p-2 flex items-center gap-3" data-testid={`live-${s.id}`}>
-                <div className="h-8 w-8 bg-yellow-500 grid place-items-center font-heading text-zinc-950 text-sm shrink-0">+1</div>
+              <div key={s.id} className={`border p-2 flex items-center gap-3 ${s.suspicious ? "border-red-600 bg-red-50" : "border-zinc-200 bg-white"}`} data-testid={`live-${s.id}`}>
+                <div className={`h-8 w-8 grid place-items-center font-heading text-sm shrink-0 ${s.suspicious ? "bg-red-600 text-white" : "bg-yellow-500 text-zinc-950"}`}>
+                  {s.suspicious ? "!" : "+1"}
+                </div>
                 <div className="min-w-0 flex-1">
-                  <div className="font-heading text-sm truncate">{s.worker_name}</div>
+                  <div className="font-heading text-sm truncate flex items-center gap-1">
+                    {s.worker_name}
+                    {s.suspicious && (
+                      <span className="text-[9px] uppercase tracking-widest bg-red-600 text-white px-1 py-0.5 font-bold" title={s.suspicious_reason || "flagged"}>
+                        Suspicious
+                      </span>
+                    )}
+                  </div>
                   <div className="font-mono-data text-[10px] text-zinc-500 truncate">{s.barcode}</div>
                 </div>
                 <div className="font-mono-data text-[10px] text-zinc-500 whitespace-nowrap">
