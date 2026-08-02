@@ -37,7 +37,9 @@ export function AuthProvider({ children }) {
   const logout = async () => {
     try {
       await api.post("/auth/logout");
-    } catch {}
+    } catch (_e) {
+      // ignore
+    }
     localStorage.removeItem("bw_token");
     setUser(false);
   };
