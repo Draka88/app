@@ -8,6 +8,7 @@ import WorkerDashboard from "./pages/WorkerDashboard";
 import AdminPayroll from "./pages/AdminPayroll";
 import AdminWorkers from "./pages/AdminWorkers";
 import AdminSettings from "./pages/AdminSettings";
+import AdminReports from "./pages/AdminReports";
 
 function Loading() {
   return (
@@ -35,6 +36,7 @@ function AppRoutes() {
     return (
       <Routes>
         <Route path="/" element={<AdminPayroll />} />
+        <Route path="/reports" element={<AdminReports />} />
         <Route path="/workers" element={<AdminWorkers />} />
         <Route path="/settings" element={<AdminSettings />} />
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -58,6 +58,9 @@ def iso_week_key(d: date) -> str:
     y, w, _ = d.isocalendar()
     return f"{y}-W{w:02d}"
 
+def month_key(d: date) -> str:
+    return f"{d.year}-{d.month:02d}"
+
 def week_range(week_key: str):
     y, w = week_key.split("-W")
     monday = date.fromisocalendar(int(y), int(w), 1)
@@ -97,6 +100,10 @@ class BoxReportIn(BaseModel):
     date: Optional[str] = None  # YYYY-MM-DD (defaults to today)
     note: Optional[str] = None
 
+class ScanIn(BaseModel):
+    barcode: str = Field(min_length=1, max_length=200)
+    format: Optional[str] = None  # e.g. "CODE_128", "EAN_13", "QR_CODE"
+
 class BoxReportOut(BaseModel):
     id: str
     worker_id: str
@@ -104,6 +111,8 @@ class BoxReportOut(BaseModel):
     date: str
     boxes: int
     note: Optional[str] = None
+    barcode: Optional[str] = None
+    source: Optional[str] = None
     week_key: str
     created_at: str
 
@@ -278,12 +287,148 @@ async def create_report(body: BoxReportIn, user: dict = Depends(get_current_user
         "date": d.isoformat(),
         "boxes": int(body.boxes),
         "note": body.note,
+        "source": "manual",
+        "barcode": None,
         "week_key": iso_week_key(d),
+        "month_key": month_key(d),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.reports.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+# ---------- Barcode scans ----------
+@api.post("/scans", response_model=BoxReportOut)
+async def create_scan(body: ScanIn, user: dict = Depends(get_current_user)):
+    if user["role"] != "worker":
+        raise HTTPException(status_code=403, detail="Only workers can scan boxes")
+    barcode = body.barcode.strip()
+    now = datetime.now(timezone.utc)
+    # Fat-finger / accidental double-scan protection: same worker + barcode within 10s
+    ten_s_ago = (now - timedelta(seconds=10)).isoformat()
+    dup = await db.reports.find_one({
+        "worker_id": user["id"],
+        "barcode": barcode,
+        "created_at": {"$gte": ten_s_ago},
+    })
+    if dup:
+        raise HTTPException(status_code=409, detail="Duplicate scan — same barcode within 10 seconds")
+    today = date.today()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "worker_id": user["id"],
+        "worker_name": user["name"],
+        "date": today.isoformat(),
+        "boxes": 1,
+        "barcode": barcode,
+        "barcode_format": body.format,
+        "source": "scan",
+        "note": None,
+        "week_key": iso_week_key(today),
+        "month_key": month_key(today),
+        "created_at": now.isoformat(),
+    }
+    await db.reports.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.get("/scans/me")
+async def my_scans(limit: int = 100, user: dict = Depends(get_current_user)):
+    limit = max(1, min(500, int(limit)))
+    rows = await db.reports.find(
+        {"worker_id": user["id"], "source": "scan"},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(limit)
+    return rows
+
+@api.get("/scans/recent")
+async def recent_scans(limit: int = 25, _: dict = Depends(require_admin)):
+    limit = max(1, min(200, int(limit)))
+    rows = await db.reports.find(
+        {"source": "scan"},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(limit)
+    return rows
+
+@api.get("/scans/all")
+async def all_scans(
+    worker_id: Optional[str] = None,
+    barcode: Optional[str] = None,
+    limit: int = 500,
+    user: dict = Depends(get_current_user),
+):
+    q: dict = {"source": "scan"}
+    if user["role"] != "admin":
+        q["worker_id"] = user["id"]
+    elif worker_id:
+        q["worker_id"] = worker_id
+    if barcode:
+        q["barcode"] = barcode
+    limit = max(1, min(1000, int(limit)))
+    rows = await db.reports.find(q, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return rows
+
+# ---------- Period summaries ----------
+@api.get("/summary/period")
+async def period_summary(
+    period: str = "week",
+    key: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """period = day|week|month, key = YYYY-MM-DD | YYYY-Www | YYYY-MM"""
+    today = date.today()
+    if period == "day":
+        k = key or today.isoformat()
+        match_key = "date"
+    elif period == "month":
+        k = key or month_key(today)
+        match_key = "month_key"
+    else:
+        k = key or iso_week_key(today)
+        match_key = "week_key"
+
+    is_admin = user["role"] == "admin"
+    if is_admin:
+        workers = await db.users.find({"role": "worker"}, {"_id": 0, "password_hash": 0}).to_list(1000)
+    else:
+        me = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+        workers = [me] if me else []
+
+    pipeline = [
+        {"$match": {match_key: k, **({} if is_admin else {"worker_id": user["id"]})}},
+        {"$group": {
+            "_id": "$worker_id",
+            "boxes": {"$sum": "$boxes"},
+            "scans": {"$sum": {"$cond": [{"$eq": ["$source", "scan"]}, 1, 0]}},
+            "manual": {"$sum": {"$cond": [{"$eq": ["$source", "scan"]}, 0, "$boxes"]}},
+        }},
+    ]
+    agg = await db.reports.aggregate(pipeline).to_list(10000)
+    m = {a["_id"]: a for a in agg}
+    rate = await _rate()
+    rows = []
+    for w in workers:
+        st = m.get(w["id"], {"boxes": 0, "scans": 0, "manual": 0})
+        rows.append({
+            "worker_id": w["id"],
+            "name": w["name"],
+            "email": w["email"],
+            "job_role": w.get("job_role"),
+            "boxes": int(st.get("boxes", 0)),
+            "scans": int(st.get("scans", 0)),
+            "manual": int(st.get("manual", 0)),
+            "earnings": round(int(st.get("boxes", 0)) * rate, 2),
+        })
+    rows.sort(key=lambda r: r["boxes"], reverse=True)
+    return {
+        "period": period,
+        "key": k,
+        "rate": rate,
+        "total_boxes": sum(r["boxes"] for r in rows),
+        "total_scans": sum(r["scans"] for r in rows),
+        "total_earnings": round(sum(r["earnings"] for r in rows), 2),
+        "rows": rows,
+    }
 
 @api.get("/reports/me")
 async def my_reports(week: Optional[str] = None, user: dict = Depends(get_current_user)):
@@ -486,6 +631,172 @@ async def payslip_pdf(worker_id: str, week: Optional[str] = None, user: dict = D
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
+# ---------- Excel exports ----------
+def _xlsx_response(wb, filename: str) -> StreamingResponse:
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+@api.get("/payslip/{worker_id}/xlsx")
+async def payslip_xlsx(worker_id: str, week: Optional[str] = None, user: dict = Depends(get_current_user)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    if user["role"] != "admin" and user["id"] != worker_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    worker = await db.users.find_one({"id": worker_id, "role": "worker"}, {"_id": 0, "password_hash": 0})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    wk = week or iso_week_key(date.today())
+    entries = await db.reports.find({"worker_id": worker_id, "week_key": wk}, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    total_boxes = sum(int(e["boxes"]) for e in entries)
+    rate = await _rate()
+    earnings = round(total_boxes * rate, 2)
+    monday, sunday = week_range(wk)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Payslip"
+    yellow = PatternFill(start_color="FFEAB308", end_color="FFEAB308", fill_type="solid")
+    dark = PatternFill(start_color="FF09090B", end_color="FF09090B", fill_type="solid")
+    bold_white = Font(bold=True, color="FFFFFFFF", size=11)
+    bold = Font(bold=True, size=11)
+    thin = Side(border_style="thin", color="FFE4E4E7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws["A1"] = "PAYSLIP"; ws["A1"].font = Font(bold=True, size=22)
+    ws["A2"] = "Boxwise Payroll"; ws["A2"].font = Font(color="FF71717A")
+    ws["A4"] = "Worker"; ws["B4"] = worker["name"]
+    ws["A5"] = "Email"; ws["B5"] = worker["email"]
+    ws["A6"] = "Job role"; ws["B6"] = worker.get("job_role") or "—"
+    ws["A7"] = "Week"; ws["B7"] = wk
+    ws["A8"] = "Pay period"; ws["B8"] = f"{monday.isoformat()} → {sunday.isoformat()}"
+    for r in range(4, 9):
+        ws.cell(row=r, column=1).font = bold
+
+    ws["A10"] = "Total Boxes"; ws["B10"] = total_boxes
+    ws["A11"] = "Rate / Box"; ws["B11"] = rate; ws["B11"].number_format = '"A$"#,##0.00'
+    ws["A12"] = "Total Earnings"; ws["B12"] = earnings; ws["B12"].number_format = '"A$"#,##0.00'
+    for r in range(10, 13):
+        ws.cell(row=r, column=1).fill = yellow
+        ws.cell(row=r, column=1).font = bold
+        ws.cell(row=r, column=2).fill = yellow
+        ws.cell(row=r, column=2).font = bold
+
+    headers = ["Timestamp", "Date", "Barcode", "Source", "Boxes", "Rate (AUD)", "Amount (AUD)", "Note"]
+    for i, h in enumerate(headers, 1):
+        c = ws.cell(row=14, column=i, value=h)
+        c.fill = dark; c.font = bold_white; c.alignment = Alignment(horizontal="left")
+    row = 15
+    for e in entries:
+        vals = [
+            e.get("created_at", ""),
+            e.get("date", ""),
+            e.get("barcode") or "—",
+            e.get("source") or "manual",
+            int(e.get("boxes", 0)),
+            rate,
+            int(e.get("boxes", 0)) * rate,
+            e.get("note") or "",
+        ]
+        for i, v in enumerate(vals, 1):
+            c = ws.cell(row=row, column=i, value=v)
+            c.border = border
+        ws.cell(row=row, column=6).number_format = '"A$"#,##0.00'
+        ws.cell(row=row, column=7).number_format = '"A$"#,##0.00'
+        row += 1
+    ws.cell(row=row, column=1, value="TOTAL").font = bold
+    ws.cell(row=row, column=5, value=total_boxes).font = bold
+    ws.cell(row=row, column=7, value=earnings).font = bold
+    ws.cell(row=row, column=7).number_format = '"A$"#,##0.00'
+
+    for col, w in zip("ABCDEFGH", [22, 12, 22, 10, 8, 12, 14, 30]):
+        ws.column_dimensions[col].width = w
+
+    filename = f"payslip_{worker['name'].replace(' ', '_')}_{wk}.xlsx"
+    return _xlsx_response(wb, filename)
+
+@api.get("/payroll/xlsx")
+async def payroll_xlsx(period: str = "week", key: Optional[str] = None, _: dict = Depends(require_admin)):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    today = date.today()
+    if period == "day":
+        k = key or today.isoformat()
+        match_key = "date"; label = f"Day {k}"
+    elif period == "month":
+        k = key or month_key(today)
+        match_key = "month_key"; label = f"Month {k}"
+    else:
+        k = key or iso_week_key(today)
+        match_key = "week_key"; label = f"Week {k}"
+
+    workers = await db.users.find({"role": "worker"}, {"_id": 0, "password_hash": 0}).to_list(1000)
+    pipeline = [
+        {"$match": {match_key: k}},
+        {"$group": {
+            "_id": "$worker_id",
+            "boxes": {"$sum": "$boxes"},
+            "scans": {"$sum": {"$cond": [{"$eq": ["$source", "scan"]}, 1, 0]}},
+        }},
+    ]
+    agg = await db.reports.aggregate(pipeline).to_list(10000)
+    m = {a["_id"]: a for a in agg}
+    rate = await _rate()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Payroll"
+    yellow = PatternFill(start_color="FFEAB308", end_color="FFEAB308", fill_type="solid")
+    dark = PatternFill(start_color="FF09090B", end_color="FF09090B", fill_type="solid")
+    bold_white = Font(bold=True, color="FFFFFFFF", size=11)
+    bold = Font(bold=True, size=11)
+
+    ws["A1"] = "PAYROLL"; ws["A1"].font = Font(bold=True, size=22)
+    ws["A2"] = label; ws["A2"].font = Font(color="FF71717A")
+    ws["A3"] = "Rate / Box"; ws["B3"] = rate; ws["B3"].number_format = '"A$"#,##0.00'
+    ws["A3"].fill = yellow; ws["B3"].fill = yellow
+    ws["A3"].font = bold; ws["B3"].font = bold
+
+    headers = ["Worker", "Role", "Email", "Scans", "Total Boxes", "Rate (AUD)", "Earnings (AUD)"]
+    for i, h in enumerate(headers, 1):
+        c = ws.cell(row=5, column=i, value=h)
+        c.fill = dark; c.font = bold_white; c.alignment = Alignment(horizontal="left")
+
+    row = 6
+    total_boxes = 0
+    total_earn = 0.0
+    total_scans = 0
+    workers_sorted = sorted(workers, key=lambda w: -(m.get(w["id"], {}).get("boxes", 0)))
+    for w in workers_sorted:
+        s = m.get(w["id"], {"boxes": 0, "scans": 0})
+        boxes = int(s.get("boxes", 0))
+        scans = int(s.get("scans", 0))
+        earn = round(boxes * rate, 2)
+        total_boxes += boxes; total_scans += scans; total_earn += earn
+        ws.cell(row=row, column=1, value=w["name"])
+        ws.cell(row=row, column=2, value=w.get("job_role") or "")
+        ws.cell(row=row, column=3, value=w["email"])
+        ws.cell(row=row, column=4, value=scans)
+        ws.cell(row=row, column=5, value=boxes)
+        ws.cell(row=row, column=6, value=rate).number_format = '"A$"#,##0.00'
+        ws.cell(row=row, column=7, value=earn).number_format = '"A$"#,##0.00'
+        row += 1
+    ws.cell(row=row, column=1, value="TOTAL").font = bold
+    ws.cell(row=row, column=4, value=total_scans).font = bold
+    ws.cell(row=row, column=5, value=total_boxes).font = bold
+    ws.cell(row=row, column=7, value=round(total_earn, 2)).font = bold
+    ws.cell(row=row, column=7).number_format = '"A$"#,##0.00'
+
+    for col, wd in zip("ABCDEFG", [24, 18, 28, 10, 14, 14, 16]):
+        ws.column_dimensions[col].width = wd
+
+    return _xlsx_response(wb, f"payroll_{k}.xlsx")
+
 # ---------- Health ----------
 @api.get("/")
 async def root():
@@ -512,7 +823,21 @@ async def startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
     await db.reports.create_index([("worker_id", 1), ("week_key", 1)])
+    await db.reports.create_index([("worker_id", 1), ("month_key", 1)])
+    await db.reports.create_index([("worker_id", 1), ("barcode", 1), ("created_at", -1)])
+    await db.reports.create_index([("source", 1), ("created_at", -1)])
     await db.reports.create_index("id", unique=True)
+
+    # Backfill month_key + source for legacy rows (idempotent)
+    async for r in db.reports.find({"month_key": {"$exists": False}}):
+        try:
+            d = date.fromisoformat(r["date"])
+            await db.reports.update_one(
+                {"id": r["id"]},
+                {"$set": {"month_key": month_key(d), "source": r.get("source") or "manual"}},
+            )
+        except Exception:
+            pass
 
     admin_email = os.environ["ADMIN_EMAIL"].strip().lower()
     admin_password = os.environ["ADMIN_PASSWORD"]

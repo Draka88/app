@@ -26,6 +26,7 @@ export default function Layout({ children }) {
               {isAdmin ? (
                 <>
                   <NavLink to="/" active={loc.pathname === "/"} label="Payroll" testid="nav-payroll" />
+                  <NavLink to="/reports" active={loc.pathname === "/reports"} label="Reports" testid="nav-reports" />
                   <NavLink to="/workers" active={loc.pathname === "/workers"} label="Workers" testid="nav-workers" />
                   <NavLink to="/settings" active={loc.pathname === "/settings"} label="Rate" testid="nav-settings" />
                 </>

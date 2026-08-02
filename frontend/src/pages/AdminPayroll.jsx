@@ -23,6 +23,7 @@ export default function AdminPayroll() {
   const [week, setWeek] = useState(isoWeekKey());
   const [payroll, setPayroll] = useState(null);
   const [roleFilter, setRoleFilter] = useState(ALL);
+  const [recentScans, setRecentScans] = useState([]);
 
   const load = useCallback(async () => {
     try {
@@ -42,6 +43,29 @@ export default function AdminPayroll() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Live scan feed: poll every 4s
+  useEffect(() => {
+    let stop = false;
+    const pull = async () => {
+      try {
+        const { data } = await api.get("/scans/recent?limit=15");
+        if (!stop) {
+          setRecentScans((prev) => {
+            // Only refresh payroll totals when a NEW scan arrives (first id changed)
+            if (prev.length > 0 && data.length > 0 && prev[0].id !== data[0].id) {
+              load();
+            }
+            return data;
+          });
+        }
+      } catch {}
+    };
+    pull();
+    const t = setInterval(pull, 4000);
+    return () => { stop = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [week]);
 
   // Distinct roles in the current payroll set
   const roles = useMemo(() => {
@@ -201,6 +225,28 @@ export default function AdminPayroll() {
           >
             ↓ CSV
           </button>
+          <button
+            onClick={() => {
+              fetch(`${API}/payroll/xlsx?period=week&key=${week}`, {
+                credentials: "include",
+                headers: { Authorization: `Bearer ${localStorage.getItem("bw_token") || ""}` },
+              })
+                .then((r) => { if (!r.ok) throw new Error("dl"); return r.blob(); })
+                .then((blob) => {
+                  const a = document.createElement("a");
+                  const url = URL.createObjectURL(blob);
+                  a.href = url; a.download = `payroll_${week}.xlsx`;
+                  document.body.appendChild(a); a.click(); a.remove();
+                  URL.revokeObjectURL(url);
+                })
+                .catch(() => toast.error("Excel download failed"));
+            }}
+            className="btn-outline-ink px-4 py-[10px] text-xs h-[42px]"
+            data-testid="export-xlsx-button"
+            title="Download payroll as Excel"
+          >
+            ↓ Excel
+          </button>
         </div>
       </div>
 
@@ -246,6 +292,40 @@ export default function AdminPayroll() {
           </button>
         </div>
       )}
+
+      <div className="card-sharp p-5 mb-6" data-testid="live-feed">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-500 opacity-75"></span>
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-green-600"></span>
+            </span>
+            <h2 className="font-heading text-xl">Live Scan Feed</h2>
+            <span className="text-xs text-zinc-500">updates every 4s</span>
+          </div>
+          <span className="text-xs text-zinc-500 font-mono-data">{recentScans.length} recent</span>
+        </div>
+        {recentScans.length === 0 ? (
+          <div className="border border-dashed border-zinc-300 py-6 text-center text-zinc-500 text-xs">
+            Waiting for the next barcode scan…
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-[240px] overflow-y-auto pr-1">
+            {recentScans.map((s) => (
+              <div key={s.id} className="border border-zinc-200 bg-white p-2 flex items-center gap-3" data-testid={`live-${s.id}`}>
+                <div className="h-8 w-8 bg-yellow-500 grid place-items-center font-heading text-zinc-950 text-sm shrink-0">+1</div>
+                <div className="min-w-0 flex-1">
+                  <div className="font-heading text-sm truncate">{s.worker_name}</div>
+                  <div className="font-mono-data text-[10px] text-zinc-500 truncate">{s.barcode}</div>
+                </div>
+                <div className="font-mono-data text-[10px] text-zinc-500 whitespace-nowrap">
+                  {new Date(s.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="card-sharp p-6 mb-6" data-testid="chart-card">
         <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
