@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import Login from "./pages/Login";
+import Register from "./pages/Register";
 import WorkerDashboard from "./pages/WorkerDashboard";
 import AdminPayroll from "./pages/AdminPayroll";
 import AdminWorkers from "./pages/AdminWorkers";
@@ -25,6 +26,7 @@ function AppRoutes() {
     return (
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     );

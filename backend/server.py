@@ -75,6 +75,12 @@ class LoginIn(BaseModel):
     email: str
     password: str
 
+class RegisterIn(BaseModel):
+    email: str
+    name: str
+    password: str
+    job_role: Optional[str] = None
+
 class WorkerCreate(BaseModel):
     email: str
     name: str
@@ -160,6 +166,35 @@ async def login(body: LoginIn, response: Response):
 async def logout(response: Response):
     response.delete_cookie("access_token", path="/")
     return {"ok": True}
+
+@api.post("/auth/register")
+async def register(body: RegisterIn, response: Response):
+    email = body.email.strip().lower()
+    if len(body.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if len(body.name.strip()) < 2:
+        raise HTTPException(status_code=400, detail="Name is required")
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=400, detail="An account with this email already exists")
+    user_id = str(uuid.uuid4())
+    doc = {
+        "id": user_id,
+        "email": email,
+        "name": body.name.strip(),
+        "role": "worker",
+        "job_role": (body.job_role or "").strip() or None,
+        "password_hash": hash_password(body.password),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "self_registered": True,
+    }
+    await db.users.insert_one(doc)
+    token = create_token(user_id, "worker")
+    set_auth_cookie(response, token)
+    return {
+        "token": token,
+        "user": {"id": user_id, "email": email, "name": doc["name"], "role": "worker"},
+    }
 
 @api.get("/auth/me", response_model=UserOut)
 async def me(user: dict = Depends(get_current_user)):

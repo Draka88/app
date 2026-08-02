@@ -140,6 +140,17 @@ export default function Login() {
             {loading ? "Signing in…" : "Enter shift →"}
           </button>
 
+          <div className="text-sm text-zinc-600">
+            New worker?{" "}
+            <a
+              href="/register"
+              className="font-bold underline text-zinc-950"
+              data-testid="link-to-register"
+            >
+              Create an account
+            </a>
+          </div>
+
           <div className="pt-2 border-t border-zinc-200 text-xs text-zinc-500 font-mono-data">
             <div>Demo · Admin: soerjantowerri@gmail.com / Admin@2026</div>
             <div>Demo · Worker: worker.a@example.com / Worker@2026</div>

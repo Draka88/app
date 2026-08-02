@@ -111,9 +111,11 @@ export default function AdminWorkers() {
         </div>
         <h1 className="font-heading text-5xl md:text-6xl leading-none">Manage Workers</h1>
         <p className="text-zinc-500 mt-2">
-          Add worker names and roles. Each worker gets login credentials to report their own boxes.
+          Add worker names and roles, or share the mobile signup link and let workers register themselves. Use <span className="font-bold">✎ Rename</span> to update any worker's name or role.
         </p>
       </div>
+
+      <ShareSignupLink />
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         <form onSubmit={add} className="card-sharp p-6 lg:col-span-2 space-y-4" data-testid="add-worker-form">
@@ -237,7 +239,14 @@ export default function AdminWorkers() {
                           data-testid={`edit-name-${w.id}`}
                         />
                       ) : (
-                        w.name
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span>{w.name}</span>
+                          {w.self_registered && (
+                            <span className="text-[9px] uppercase tracking-widest bg-yellow-500 text-zinc-950 px-1.5 py-0.5 font-bold" data-testid={`self-registered-${w.id}`}>
+                              Self-signup
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-3 py-2">
@@ -280,10 +289,10 @@ export default function AdminWorkers() {
                         <>
                           <button
                             onClick={() => startEdit(w)}
-                            className="text-xs text-zinc-700 hover:underline"
+                            className="text-xs font-bold text-zinc-950 border border-zinc-300 px-2 py-1 hover:bg-zinc-950 hover:text-white transition-colors duration-150"
                             data-testid={`edit-worker-${w.id}`}
                           >
-                            Edit
+                            ✎ Rename
                           </button>
                           <button
                             onClick={() => resetPw(w.id)}
@@ -310,5 +319,43 @@ export default function AdminWorkers() {
         </div>
       </div>
     </Layout>
+  );
+}
+
+function ShareSignupLink() {
+  const url = `${window.location.origin}/register`;
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      toast.success("Signup link copied");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Copy failed — copy manually");
+    }
+  };
+  return (
+    <div className="card-sharp p-5 mb-6 flex items-center gap-4 flex-wrap" data-testid="share-signup-card">
+      <div className="h-12 w-12 bg-zinc-950 text-yellow-500 grid place-items-center font-heading text-xl">
+        📱
+      </div>
+      <div className="flex-1 min-w-[220px]">
+        <div className="font-heading text-sm">Worker Self-Signup Link</div>
+        <div className="text-xs text-zinc-500 mb-1">
+          Share this URL — workers register from their phone and auto-appear in your roster.
+        </div>
+        <div className="font-mono-data text-xs bg-zinc-100 px-2 py-1 border border-zinc-200 break-all" data-testid="signup-link-value">
+          {url}
+        </div>
+      </div>
+      <button
+        onClick={copy}
+        className="btn-yellow px-4 py-3 text-xs"
+        data-testid="copy-signup-link"
+      >
+        {copied ? "Copied ✓" : "Copy link"}
+      </button>
+    </div>
   );
 }
