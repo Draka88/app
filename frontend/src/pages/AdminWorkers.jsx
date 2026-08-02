@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { api, formatApiError } from "../lib/api";
 import Layout from "../components/Layout";
 import { toast } from "sonner";
@@ -335,27 +336,90 @@ function ShareSignupLink() {
       toast.error("Copy failed — copy manually");
     }
   };
+  const downloadQR = () => {
+    const svg = document.getElementById("signup-qr-svg");
+    if (!svg) return;
+    const serializer = new XMLSerializer();
+    const svgStr = serializer.serializeToString(svg);
+    const img = new Image();
+    const svgBlob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+    const objectUrl = URL.createObjectURL(svgBlob);
+    img.onload = () => {
+      const size = 600;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, size, size);
+      ctx.drawImage(img, 0, 0, size, size);
+      canvas.toBlob((blob) => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "boxwise-signup-qr.png";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(objectUrl);
+      }, "image/png");
+    };
+    img.src = objectUrl;
+  };
   return (
-    <div className="card-sharp p-5 mb-6 flex items-center gap-4 flex-wrap" data-testid="share-signup-card">
-      <div className="h-12 w-12 bg-zinc-950 text-yellow-500 grid place-items-center font-heading text-xl">
-        📱
-      </div>
-      <div className="flex-1 min-w-[220px]">
-        <div className="font-heading text-sm">Worker Self-Signup Link</div>
-        <div className="text-xs text-zinc-500 mb-1">
-          Share this URL — workers register from their phone and auto-appear in your roster.
+    <div className="card-sharp p-6 mb-6" data-testid="share-signup-card">
+      <div className="grid grid-cols-1 md:grid-cols-[auto,1fr] gap-6 items-center">
+        <div className="flex flex-col items-center gap-2">
+          <div className="bg-white border-2 border-zinc-950 p-3" data-testid="signup-qr">
+            <QRCodeSVG
+              id="signup-qr-svg"
+              value={url}
+              size={168}
+              level="M"
+              includeMargin={false}
+              bgColor="#ffffff"
+              fgColor="#09090b"
+            />
+          </div>
+          <button
+            onClick={downloadQR}
+            className="text-[10px] font-heading tracking-widest text-zinc-700 hover:text-zinc-950 underline"
+            data-testid="download-qr"
+          >
+            ↓ Download PNG
+          </button>
         </div>
-        <div className="font-mono-data text-xs bg-zinc-100 px-2 py-1 border border-zinc-200 break-all" data-testid="signup-link-value">
-          {url}
+        <div className="min-w-0">
+          <div className="inline-block bg-yellow-500 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-zinc-950 mb-2">
+            Scan · One-Tap Signup
+          </div>
+          <div className="font-heading text-2xl">Worker Self-Signup</div>
+          <p className="text-sm text-zinc-500 mt-1">
+            Show this QR to workers — they scan with a phone camera and land straight
+            on the signup form. Once submitted, they auto-appear in your roster.
+          </p>
+          <div className="mt-3 font-mono-data text-xs bg-zinc-100 px-2 py-2 border border-zinc-200 break-all" data-testid="signup-link-value">
+            {url}
+          </div>
+          <div className="mt-3 flex gap-2 flex-wrap">
+            <button
+              onClick={copy}
+              className="btn-yellow px-4 py-2 text-xs"
+              data-testid="copy-signup-link"
+            >
+              {copied ? "Copied ✓" : "Copy link"}
+            </button>
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="btn-outline-ink px-4 py-2 text-xs inline-flex items-center"
+              data-testid="open-signup-link"
+            >
+              Open ↗
+            </a>
+          </div>
         </div>
       </div>
-      <button
-        onClick={copy}
-        className="btn-yellow px-4 py-3 text-xs"
-        data-testid="copy-signup-link"
-      >
-        {copied ? "Copied ✓" : "Copy link"}
-      </button>
     </div>
   );
 }
