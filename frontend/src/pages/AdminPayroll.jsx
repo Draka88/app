@@ -108,7 +108,7 @@ export default function AdminPayroll() {
             <tbody>
               {(!payroll || payroll.rows.length === 0) && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-10 text-center text-zinc-500">
+                  <td colSpan={7} className="px-3 py-10 text-center text-zinc-500">
                     No workers yet. Add workers under the Workers tab.
                   </td>
                 </tr>
@@ -116,6 +116,15 @@ export default function AdminPayroll() {
               {payroll?.rows.map((r) => (
                 <tr key={r.worker_id} className="border-t border-zinc-100" data-testid={`payroll-row-${r.worker_id}`}>
                   <td className="px-3 py-2 font-heading text-base">{r.name}</td>
+                  <td className="px-3 py-2">
+                    {r.job_role ? (
+                      <span className="inline-block border border-zinc-900 px-2 py-0.5 text-[10px] uppercase tracking-widest font-bold">
+                        {r.job_role}
+                      </span>
+                    ) : (
+                      <span className="text-zinc-400 text-xs italic">unassigned</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-zinc-600">{r.email}</td>
                   <td className="px-3 py-2 text-right font-mono-data font-semibold">{fmtInt(r.boxes)}</td>
                   <td className="px-3 py-2 text-right font-mono-data">{fmtAUD(rate)}</td>
@@ -135,7 +144,7 @@ export default function AdminPayroll() {
             {payroll && payroll.rows.length > 0 && (
               <tfoot>
                 <tr className="bg-zinc-100 border-t-2 border-zinc-900">
-                  <td className="px-3 py-2 font-heading" colSpan={2}>Total</td>
+                  <td className="px-3 py-2 font-heading" colSpan={3}>Total</td>
                   <td className="px-3 py-2 text-right font-mono-data font-bold">{fmtInt(payroll.total_boxes)}</td>
                   <td className="px-3 py-2 text-right font-mono-data">{fmtAUD(rate)}</td>
                   <td className="px-3 py-2 text-right font-mono-data font-bold">{fmtAUD(payroll.total_earnings)}</td>

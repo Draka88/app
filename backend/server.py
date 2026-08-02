@@ -79,10 +79,12 @@ class WorkerCreate(BaseModel):
     email: str
     name: str
     password: str
+    job_role: Optional[str] = None
 
 class WorkerUpdate(BaseModel):
     name: Optional[str] = None
     password: Optional[str] = None
+    job_role: Optional[str] = None
 
 class BoxReportIn(BaseModel):
     boxes: int = Field(ge=0)
@@ -180,6 +182,7 @@ async def create_worker(body: WorkerCreate, _: dict = Depends(require_admin)):
         "email": email,
         "name": body.name.strip(),
         "role": "worker",
+        "job_role": (body.job_role or "").strip() or None,
         "password_hash": hash_password(body.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -195,6 +198,8 @@ async def update_worker(worker_id: str, body: WorkerUpdate, _: dict = Depends(re
         update["name"] = body.name.strip()
     if body.password:
         update["password_hash"] = hash_password(body.password)
+    if body.job_role is not None:
+        update["job_role"] = body.job_role.strip() or None
     if not update:
         raise HTTPException(status_code=400, detail="Nothing to update")
     res = await db.users.update_one({"id": worker_id, "role": "worker"}, {"$set": update})
@@ -307,6 +312,7 @@ async def weekly_summary(week: Optional[str] = None, _: dict = Depends(require_a
             "worker_id": w["id"],
             "name": w["name"],
             "email": w["email"],
+            "job_role": w.get("job_role"),
             "boxes": boxes,
             "earnings": round(boxes * rate, 2),
         })
