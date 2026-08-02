@@ -38,6 +38,7 @@ export default function AdminWhitelist() {
   const [dayTotals, setDayTotals] = useState({});
   const [busy, setBusy] = useState(false);
   const [suspicious, setSuspicious] = useState([]);
+  const [rejections, setRejections] = useState([]);
   const fileRef = useRef(null);
 
   const dates = useMemo(() => weekDates(week), [week]);
@@ -45,19 +46,25 @@ export default function AdminWhitelist() {
   const load = useCallback(async () => {
     try {
       if (mode === "day") {
-        const [wl, sus] = await Promise.all([
+        const [wl, sus, rej] = await Promise.all([
           api.get(`/whitelist?date_=${dateStr}`),
           api.get(`/scans/suspicious?limit=50`),
+          api.get(`/scans/rejections?limit=100`),
         ]);
         setEntries(wl.data.barcodes || []);
         setSuspicious((sus.data || []).filter((s) => s.date === dateStr));
+        setRejections((rej.data || []).filter((r) => r.date === dateStr));
       } else {
         const totals = {};
         const responses = await Promise.all(dates.map((d) => api.get(`/whitelist?date_=${d}`)));
         responses.forEach((r, i) => { totals[dates[i]] = r.data.total || 0; });
         setDayTotals(totals);
-        const sus = await api.get(`/scans/suspicious?limit=200`);
+        const [sus, rej] = await Promise.all([
+          api.get(`/scans/suspicious?limit=200`),
+          api.get(`/scans/rejections?limit=200`),
+        ]);
         setSuspicious((sus.data || []).filter((s) => dates.includes(s.date)));
+        setRejections((rej.data || []).filter((r) => dates.includes(r.date)));
       }
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail));
@@ -399,6 +406,45 @@ export default function AdminWhitelist() {
                       <td className="px-3 py-2">{s.worker_name}</td>
                       <td className="px-3 py-2 font-mono-data text-xs break-all">{s.barcode}</td>
                       <td className="px-3 py-2 text-red-700 text-xs">{s.suspicious_reason || "unknown"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="card-sharp p-5" data-testid="rejections-card">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="font-heading text-xl">Rejected scans</h2>
+              <span className="text-xs text-zinc-500">
+                Duplicates blocked from counting · {mode === "day" ? dateStr : `week ${week}`}
+              </span>
+            </div>
+            <div className="overflow-x-auto border border-zinc-200 max-h-[220px] overflow-y-auto">
+              <table className="w-full text-sm zebra" data-testid="rejections-table">
+                <thead className="bg-zinc-950 text-white sticky top-0">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-heading text-xs">Time</th>
+                    <th className="text-left px-3 py-2 font-heading text-xs">Attempted by</th>
+                    <th className="text-left px-3 py-2 font-heading text-xs">Barcode</th>
+                    <th className="text-left px-3 py-2 font-heading text-xs">Original scan</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rejections.length === 0 && (
+                    <tr><td colSpan={4} className="px-3 py-6 text-center text-zinc-500 text-xs">
+                      No rejected duplicate scans.
+                    </td></tr>
+                  )}
+                  {rejections.map((r) => (
+                    <tr key={r.id} className="border-t border-zinc-100 bg-orange-50/50" data-testid={`rej-${r.id}`}>
+                      <td className="px-3 py-2 font-mono-data text-xs whitespace-nowrap">{new Date(r.created_at).toLocaleTimeString()}</td>
+                      <td className="px-3 py-2">{r.worker_name}</td>
+                      <td className="px-3 py-2 font-mono-data text-xs break-all">{r.barcode}</td>
+                      <td className="px-3 py-2 text-xs text-zinc-600">
+                        by <b>{r.original_worker_name || "—"}</b>
+                        {r.original_scanned_at && <> at {new Date(r.original_scanned_at).toLocaleTimeString()}</>}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

@@ -53,18 +53,31 @@ export default function WorkerDashboard() {
     scanBusyRef.current = true;
     try {
       const { data } = await api.post("/scans", { barcode, format });
-      toast.success(`+1 box · ${barcode}`, { description: `Total today: ${dayCount + 1}` });
+      if (data.suspicious) {
+        toast.warning(`⚠ Not on today's whitelist: ${barcode}`, { description: `Scan counted, flagged for review.` });
+      } else {
+        toast.success(`+1 box · ${barcode}`, { description: `Total today: ${dayCount + 1}` });
+      }
       setScans((prev) => [data, ...prev].slice(0, 50));
       setDayCount((n) => n + 1);
-      // refresh summary
       const s = await api.get(`/summary/me?week=${week}`);
       setSummary(s.data);
     } catch (e) {
       const status = e.response?.status;
-      if (status === 409) {
-        toast.warning("Duplicate scan ignored (10s window)");
+      const detail = e.response?.data?.detail;
+      if (status === 409 && detail && typeof detail === "object") {
+        const originalTime = detail.original_time ? new Date(detail.original_time).toLocaleTimeString() : "";
+        toast.error("This barcode has already been scanned today.", {
+          description: `${barcode} · already scanned by ${detail.original_worker || "another worker"}${originalTime ? " at " + originalTime : ""}. Box count NOT increased.`,
+          duration: 5000,
+        });
+      } else if (status === 409) {
+        toast.error("This barcode has already been scanned today.", {
+          description: "Box count NOT increased.",
+          duration: 5000,
+        });
       } else {
-        toast.error(formatApiError(e.response?.data?.detail));
+        toast.error(formatApiError(detail));
       }
     } finally {
       setTimeout(() => { scanBusyRef.current = false; }, 400);

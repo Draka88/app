@@ -325,17 +325,40 @@ async def create_scan(body: ScanIn, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only workers can scan boxes")
     barcode = body.barcode.strip()
     now = datetime.now(timezone.utc)
-    # Fat-finger / accidental double-scan protection: same worker + barcode within 10s
-    ten_s_ago = (now - timedelta(seconds=10)).isoformat()
-    dup = await db.reports.find_one({
-        "worker_id": user["id"],
-        "barcode": barcode,
-        "created_at": {"$gte": ten_s_ago},
-    })
-    if dup:
-        raise HTTPException(status_code=409, detail="Duplicate scan — same barcode within 10 seconds")
     today = date.today()
     today_s = today.isoformat()
+    # Day-level dedupe: same barcode can only count ONCE per day (any worker)
+    existing = await db.reports.find_one({
+        "source": "scan",
+        "barcode": barcode,
+        "date": today_s,
+    })
+    if existing:
+        # Log the rejection for audit, but do not increment the count
+        rej = {
+            "id": str(uuid.uuid4()),
+            "worker_id": user["id"],
+            "worker_name": user["name"],
+            "barcode": barcode,
+            "date": today_s,
+            "created_at": now.isoformat(),
+            "reason": "duplicate-same-day",
+            "original_worker_id": existing.get("worker_id"),
+            "original_worker_name": existing.get("worker_name"),
+            "original_scanned_at": existing.get("created_at"),
+        }
+        await db.scan_rejections.insert_one(rej)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "This barcode has already been scanned today.",
+                "barcode": barcode,
+                "original_worker": existing.get("worker_name"),
+                "original_time": existing.get("created_at"),
+                "reason": "duplicate-same-day",
+            },
+        )
+
     # Whitelist enforcement (soft): if a whitelist exists for today, mark scans not in it as suspicious
     suspicious = False
     reason = None
@@ -364,6 +387,12 @@ async def create_scan(body: ScanIn, user: dict = Depends(get_current_user)):
     await db.reports.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+@api.get("/scans/rejections")
+async def scan_rejections(limit: int = 100, _: dict = Depends(require_admin)):
+    limit = max(1, min(500, int(limit)))
+    rows = await db.scan_rejections.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return rows
 
 # ---------- Whitelist ----------
 @api.post("/whitelist")
@@ -1153,6 +1182,9 @@ async def startup():
     await db.reports.create_index([("source", 1), ("created_at", -1)])
     await db.reports.create_index("id", unique=True)
     await db.whitelist.create_index([("date", 1), ("barcode", 1)], unique=True)
+    await db.reports.create_index([("source", 1), ("date", 1), ("barcode", 1)])
+    await db.scan_rejections.create_index([("created_at", -1)])
+    await db.scan_rejections.create_index([("date", 1), ("barcode", 1)])
 
     # Backfill month_key + source for legacy rows (idempotent)
     async for r in db.reports.find({"month_key": {"$exists": False}}):
