@@ -1,0 +1,32 @@
+{
+  "summary": "First-finish smoke test of Boxwise Payroll app. Verified backend auth, role-gated endpoints, weekly aggregation, PDF payslip, and admin+worker UI flows end-to-end via ingress URL.",
+  "tested_scope": ["backend", "frontend", "auth", "integration"],
+  "passed": [
+    "GET /api/auth/me returns 401 without token",
+    "POST /api/auth/login (admin + worker.a + worker.b) returns JWT token in 'token' field",
+    "GET /api/auth/me with Bearer token returns correct user + role",
+    "GET /api/workers (admin) lists Worker A and Worker B seed users",
+    "GET /api/settings/rate returns current AUD rate",
+    "PUT /api/settings/rate (admin) updates rate; reflected in Payroll UI immediately (16 boxes went from $40.00 @2.50 to $52.00 @3.25)",
+    "GET /api/summary/weekly (admin) returns per-worker rows with correct totals",
+    "GET /api/summary/me (worker) returns weekly totals with correct rate + earnings",
+    "POST /api/reports (worker) creates report and updates weekly totals",
+    "DELETE /api/reports/{id} (worker) removes entry and recalculates KPIs (0 boxes, $0.00)",
+    "GET /api/payslip/{worker_id} returns application/pdf, valid %PDF header, size 2915 bytes",
+    "Role-gating: worker gets 403 on PUT /api/settings/rate, GET /api/summary/weekly, POST /api/workers",
+    "Frontend admin login -> Weekly Payroll dashboard renders KPI cards (kpi-rate, kpi-total-boxes, kpi-workers, kpi-total-earnings) and payroll-table with per-worker rows + payslip download buttons",
+    "Frontend Rate tab: rate-form updates rate; current-rate-card reflects new value; roster $ recomputes",
+    "Frontend worker login -> My Shift Log renders kpi-boxes, kpi-rate, kpi-earnings, report-form, week-selector, payslip-download-button",
+    "Frontend worker report submit: 10 boxes -> kpi-boxes=10, kpi-earnings=$32.50 (10 x 3.25); row appears in Weekly Log",
+    "Frontend worker delete-report: entry removed, KPIs reset to 0 / $0.00",
+    "Weekly aggregation math correct: 16 boxes x $2.50 = $40.00, then 16 x $3.25 = $52.00",
+    "ISO week format 2026-W31 rendered in week-selector"
+  ],
+  "failed": [],
+  "action_items": [
+    "None blocking. Optional: Login response returns 'token' (frontend expects this, working) but not 'access_token'; not an issue since AuthContext reads 'token' into bw_token."
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true
+}
