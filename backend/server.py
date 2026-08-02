@@ -109,6 +109,14 @@ class WhitelistIn(BaseModel):
     barcodes: List[str]
     replace: bool = False
 
+class WhitelistEntryIn(BaseModel):
+    date: str
+    barcode: str
+
+class WhitelistBulkIn(BaseModel):
+    entries: List[WhitelistEntryIn]
+    replace_week: Optional[str] = None  # YYYY-Www to clear before insert
+
 class BoxReportOut(BaseModel):
     id: str
     worker_id: str
@@ -408,6 +416,66 @@ async def whitelist_dates(_: dict = Depends(require_admin)):
     dates = await db.whitelist.distinct("date")
     dates.sort(reverse=True)
     return {"dates": dates}
+
+@api.post("/whitelist/bulk")
+async def upload_whitelist_bulk(body: WhitelistBulkIn, user: dict = Depends(require_admin)):
+    """Bulk upload: pass a list of {date, barcode} entries covering multiple days at once."""
+    # Optional: wipe an entire week first
+    if body.replace_week:
+        try:
+            monday, sunday = week_range(body.replace_week)
+        except Exception:
+            raise HTTPException(status_code=400, detail="replace_week must be YYYY-Www")
+        week_days = [(monday + td(days=i)).isoformat() for i in range(7)]
+        await db.whitelist.delete_many({"date": {"$in": week_days}})
+
+    # Clean + dedupe entries locally
+    seen = set()
+    valid = []
+    for e in body.entries:
+        b = (e.barcode or "").strip()
+        d = (e.date or "").strip()
+        if not b or not d:
+            continue
+        try:
+            date.fromisoformat(d)
+        except ValueError:
+            continue
+        key = (d, b)
+        if key in seen:
+            continue
+        seen.add(key)
+        valid.append({"date": d, "barcode": b})
+
+    if not valid:
+        raise HTTPException(status_code=400, detail="No valid barcodes to upload")
+
+    # Filter out entries that already exist
+    days = list({e["date"] for e in valid})
+    existing_pairs = set()
+    async for r in db.whitelist.find({"date": {"$in": days}}, {"_id": 0, "date": 1, "barcode": 1}):
+        existing_pairs.add((r["date"], r["barcode"]))
+    to_insert = [
+        {**e, "uploaded_by": user["email"], "uploaded_at": datetime.now(timezone.utc).isoformat()}
+        for e in valid if (e["date"], e["barcode"]) not in existing_pairs
+    ]
+    if to_insert:
+        await db.whitelist.insert_many(to_insert)
+
+    # Report totals per day
+    per_day = {}
+    for e in valid:
+        per_day[e["date"]] = per_day.get(e["date"], 0) + 1
+    day_totals = {}
+    for d in days:
+        day_totals[d] = await db.whitelist.count_documents({"date": d})
+    return {
+        "requested": len(valid),
+        "inserted": len(to_insert),
+        "skipped": len(valid) - len(to_insert),
+        "days_affected": len(days),
+        "per_day_totals": day_totals,
+    }
 
 @api.get("/scans/suspicious")
 async def suspicious_scans(limit: int = 100, _: dict = Depends(require_admin)):

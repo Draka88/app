@@ -1,5 +1,6 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { api, formatApiError } from "../lib/api";
+import { isoWeekKey } from "../lib/format";
 import Layout from "../components/Layout";
 import { toast } from "sonner";
 
@@ -8,54 +9,125 @@ function todayISO() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// Given an ISO week key like "2026-W31", return 7 dates Mon..Sun
+function weekDates(wk) {
+  const [y, w] = wk.split("-W").map(Number);
+  // ISO week starts on Monday. Compute Monday of the given ISO week.
+  const jan4 = new Date(Date.UTC(y, 0, 4));
+  const jan4Day = jan4.getUTCDay() || 7;
+  const week1Monday = new Date(jan4);
+  week1Monday.setUTCDate(jan4.getUTCDate() - (jan4Day - 1));
+  const monday = new Date(week1Monday);
+  monday.setUTCDate(week1Monday.getUTCDate() + (w - 1) * 7);
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(monday);
+    d.setUTCDate(monday.getUTCDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+}
+const WEEKDAY_LABELS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
 export default function AdminWhitelist() {
+  const [mode, setMode] = useState("day"); // day | week
   const [dateStr, setDateStr] = useState(todayISO());
+  const [week, setWeek] = useState(isoWeekKey());
+  const [selectedDays, setSelectedDays] = useState([true, true, true, true, true, false, false]);
   const [text, setText] = useState("");
   const [replace, setReplace] = useState(false);
   const [entries, setEntries] = useState([]);
+  const [dayTotals, setDayTotals] = useState({});
   const [busy, setBusy] = useState(false);
   const [suspicious, setSuspicious] = useState([]);
   const fileRef = useRef(null);
 
+  const dates = useMemo(() => weekDates(week), [week]);
+
   const load = useCallback(async () => {
     try {
-      const [wl, sus] = await Promise.all([
-        api.get(`/whitelist?date_=${dateStr}`),
-        api.get(`/scans/suspicious?limit=50`),
-      ]);
-      setEntries(wl.data.barcodes || []);
-      setSuspicious((sus.data || []).filter((s) => s.date === dateStr));
+      if (mode === "day") {
+        const [wl, sus] = await Promise.all([
+          api.get(`/whitelist?date_=${dateStr}`),
+          api.get(`/scans/suspicious?limit=50`),
+        ]);
+        setEntries(wl.data.barcodes || []);
+        setSuspicious((sus.data || []).filter((s) => s.date === dateStr));
+      } else {
+        const totals = {};
+        const responses = await Promise.all(dates.map((d) => api.get(`/whitelist?date_=${d}`)));
+        responses.forEach((r, i) => { totals[dates[i]] = r.data.total || 0; });
+        setDayTotals(totals);
+        const sus = await api.get(`/scans/suspicious?limit=200`);
+        setSuspicious((sus.data || []).filter((s) => dates.includes(s.date)));
+      }
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail));
     }
-  }, [dateStr]);
+  }, [mode, dateStr, week, dates]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
-  const parseInput = () => {
-    // Accept newline, comma, semicolon, or tab separated
-    return text
-      .split(/[\n,;\t]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-  };
+  // Parse textarea:
+  //   Plain lines "BARCODE" → assigned to all selected days
+  //   Lines "YYYY-MM-DD,BARCODE" or "YYYY-MM-DD BARCODE" → assigned to that exact date
+  const parsedEntries = useMemo(() => {
+    const lines = text.split(/[\n]+/).map((l) => l.trim()).filter(Boolean);
+    const entries = [];
+    const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+    const activeDates = mode === "day"
+      ? [dateStr]
+      : dates.filter((_, i) => selectedDays[i]);
+    for (const raw of lines) {
+      const parts = raw.split(/[,;\t\s]+/).filter(Boolean);
+      if (parts.length >= 2 && isDate(parts[0])) {
+        // per-line date + barcode(s)
+        const d = parts[0];
+        for (const b of parts.slice(1)) entries.push({ date: d, barcode: b });
+      } else {
+        // plain barcode(s), tokenize
+        for (const b of parts) {
+          if (!isDate(b)) {
+            for (const d of activeDates) entries.push({ date: d, barcode: b });
+          }
+        }
+      }
+    }
+    // Dedupe
+    const seen = new Set();
+    return entries.filter((e) => {
+      const k = `${e.date}::${e.barcode}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }, [text, mode, dateStr, dates, selectedDays]);
+
+  const perDayPreview = useMemo(() => {
+    const m = {};
+    for (const e of parsedEntries) m[e.date] = (m[e.date] || 0) + 1;
+    return m;
+  }, [parsedEntries]);
 
   const upload = async () => {
-    const list = parseInput();
-    if (list.length === 0) {
+    if (parsedEntries.length === 0) {
       toast.error("Paste some barcodes first");
       return;
     }
     setBusy(true);
     try {
-      const { data } = await api.post("/whitelist", {
-        date: dateStr,
-        barcodes: list,
-        replace,
-      });
-      toast.success(`Whitelist saved · ${data.total} barcodes total`);
+      if (mode === "day") {
+        // Use the day endpoint for backward compat
+        const { data } = await api.post("/whitelist", {
+          date: dateStr,
+          barcodes: parsedEntries.map((e) => e.barcode),
+          replace,
+        });
+        toast.success(`Day saved · ${data.total} barcodes for ${dateStr}`);
+      } else {
+        const payload = { entries: parsedEntries };
+        if (replace) payload.replace_week = week;
+        const { data } = await api.post("/whitelist/bulk", payload);
+        toast.success(`Week saved · ${data.inserted} added, ${data.skipped} already existed · ${data.days_affected} day(s)`);
+      }
       setText("");
       setReplace(false);
       await load();
@@ -67,13 +139,21 @@ export default function AdminWhitelist() {
   };
 
   const clearAll = async () => {
-    if (!window.confirm(`Clear the entire whitelist for ${dateStr}?`)) return;
-    try {
-      await api.delete(`/whitelist?date_=${dateStr}`);
-      toast.success("Whitelist cleared");
-      await load();
-    } catch (e) {
-      toast.error(formatApiError(e.response?.data?.detail));
+    if (mode === "day") {
+      if (!window.confirm(`Clear the whitelist for ${dateStr}?`)) return;
+      try {
+        await api.delete(`/whitelist?date_=${dateStr}`);
+        toast.success("Day cleared");
+        await load();
+      } catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
+    } else {
+      if (!window.confirm(`Clear the ENTIRE week ${week}?`)) return;
+      try {
+        // Use bulk endpoint with replace_week + empty valid list → workaround: pass replace_week and one dummy? Simpler: call delete per day in parallel.
+        await Promise.all(dates.map((d) => api.delete(`/whitelist?date_=${d}`)));
+        toast.success(`Week ${week} cleared`);
+        await load();
+      } catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
     }
   };
 
@@ -84,7 +164,10 @@ export default function AdminWhitelist() {
     toast.success(`Loaded ${file.name}`);
   };
 
-  const enforcementOn = entries.length > 0;
+  const enforcementOn = mode === "day"
+    ? entries.length > 0
+    : Object.values(dayTotals).some((v) => v > 0);
+  const weekTotal = Object.values(dayTotals).reduce((a, b) => a + b, 0);
 
   return (
     <Layout>
@@ -92,42 +175,106 @@ export default function AdminWhitelist() {
         <div className="inline-block bg-yellow-500 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-zinc-950 mb-2">
           Admin · Barcode Whitelist
         </div>
-        <h1 className="font-heading text-5xl md:text-6xl leading-none">Daily Whitelist</h1>
+        <h1 className="font-heading text-5xl md:text-6xl leading-none">Barcode Whitelist</h1>
         <p className="text-zinc-500 mt-2">
-          Upload the barcodes you expect for the day. Scans that don't match get flagged as
-          <span className="font-bold"> SUSPICIOUS</span> on the reports — nothing is blocked, so
-          real work never stops.
+          Upload the barcodes you expect for a single day or a whole week. Scans that don't match
+          get flagged as <span className="font-bold">SUSPICIOUS</span> — nothing is blocked, so real
+          work never stops.
         </p>
+      </div>
+
+      {/* Mode toggle */}
+      <div className="flex items-center gap-2 mb-4" data-testid="mode-toggle">
+        {["day", "week"].map((m) => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            className={`px-4 py-2 text-xs font-heading tracking-widest border-2 ${mode === m ? "bg-zinc-950 text-white border-zinc-950" : "bg-white border-zinc-300 text-zinc-700 hover:border-zinc-950"}`}
+            data-testid={`mode-${m}`}
+          >
+            {m.toUpperCase()}
+          </button>
+        ))}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Upload card */}
         <div className="card-sharp p-5 lg:col-span-2 space-y-4" data-testid="upload-card">
-          <div>
-            <label className="block font-heading text-xs mb-1 text-zinc-700">Date</label>
-            <input
-              type="date"
-              value={dateStr}
-              onChange={(e) => setDateStr(e.target.value)}
-              className="input-sharp font-mono-data"
-              data-testid="whitelist-date"
-            />
-          </div>
+          {mode === "day" ? (
+            <div>
+              <label className="block font-heading text-xs mb-1 text-zinc-700">Date</label>
+              <input
+                type="date"
+                value={dateStr}
+                onChange={(e) => setDateStr(e.target.value)}
+                className="input-sharp font-mono-data"
+                data-testid="whitelist-date"
+              />
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="block font-heading text-xs mb-1 text-zinc-700">ISO Week</label>
+                <input
+                  type="text"
+                  value={week}
+                  onChange={(e) => setWeek(e.target.value)}
+                  placeholder="2026-W31"
+                  className="input-sharp font-mono-data"
+                  data-testid="whitelist-week"
+                />
+                <div className="text-[11px] text-zinc-500 mt-1 font-mono-data">
+                  {dates[0]} → {dates[6]}
+                </div>
+              </div>
+              <div>
+                <label className="block font-heading text-xs mb-2 text-zinc-700">
+                  Apply plain barcodes to
+                </label>
+                <div className="grid grid-cols-7 gap-1">
+                  {WEEKDAY_LABELS.map((lbl, i) => (
+                    <button
+                      type="button"
+                      key={lbl}
+                      onClick={() => {
+                        const next = [...selectedDays];
+                        next[i] = !next[i];
+                        setSelectedDays(next);
+                      }}
+                      className={`text-[10px] font-heading py-2 border ${selectedDays[i] ? "bg-yellow-500 border-yellow-500 text-zinc-950" : "bg-white border-zinc-300 text-zinc-500"}`}
+                      data-testid={`day-toggle-${i}`}
+                      title={dates[i]}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+                <div className="text-[11px] text-zinc-500 mt-1">
+                  Lines with a date prefix (e.g. <code>2026-08-04,BOX-042</code>) override this.
+                </div>
+              </div>
+            </>
+          )}
 
           <div>
             <label className="block font-heading text-xs mb-1 text-zinc-700">
-              Barcodes (one per line, or comma-separated)
+              Barcodes
             </label>
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
               rows={10}
-              placeholder={`BOX-0001\nBOX-0002\nBOX-0003`}
+              placeholder={mode === "day"
+                ? `BOX-0001\nBOX-0002\nBOX-0003`
+                : `BOX-0001\nBOX-0002\n2026-08-04,BOX-0100\n2026-08-05 BOX-0200`}
               className="input-sharp font-mono-data text-sm"
               data-testid="whitelist-textarea"
             />
             <div className="text-[11px] text-zinc-500 mt-1">
-              Parsed: {parseInput().length} barcode{parseInput().length === 1 ? "" : "s"}
+              Preview: {parsedEntries.length} whitelisted entr{parsedEntries.length === 1 ? "y" : "ies"}
+              {mode === "week" && parsedEntries.length > 0 && (
+                <span> across {Object.keys(perDayPreview).length} day(s)</span>
+              )}
             </div>
           </div>
 
@@ -165,7 +312,7 @@ export default function AdminWhitelist() {
               className="btn-yellow flex-1 py-3 text-xs"
               data-testid="whitelist-save"
             >
-              {busy ? "Saving…" : "Save whitelist →"}
+              {busy ? "Saving…" : `Save ${mode} whitelist →`}
             </button>
             <button
               onClick={clearAll}
@@ -174,39 +321,61 @@ export default function AdminWhitelist() {
               disabled={!enforcementOn}
               style={{ opacity: enforcementOn ? 1 : 0.5 }}
             >
-              Clear day
+              Clear {mode}
             </button>
           </div>
         </div>
 
-        {/* Status + suspicious */}
+        {/* Status + panels */}
         <div className="lg:col-span-3 space-y-4">
           <div className={`card-sharp p-5 ${enforcementOn ? "bg-yellow-500 border-yellow-500" : ""}`} data-testid="status-card">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
                 <div className="font-heading text-xs tracking-widest">
-                  Enforcement · {dateStr}
+                  Enforcement · {mode === "day" ? dateStr : `Week ${week}`}
                 </div>
                 <div className="font-heading text-3xl mt-1">
                   {enforcementOn ? "ACTIVE" : "OFF"}
                 </div>
                 <p className="text-xs mt-1 max-w-md">
-                  {enforcementOn
-                    ? `${entries.length} barcode${entries.length === 1 ? "" : "s"} expected. Scans outside this list are flagged.`
-                    : "No whitelist uploaded — all scans are accepted without flagging."}
+                  {mode === "day"
+                    ? (enforcementOn ? `${entries.length} barcode(s) expected. Scans outside are flagged.` : "No whitelist for this day — all scans accepted.")
+                    : (enforcementOn ? `${weekTotal} barcode(s) expected across the week. Scans outside are flagged.` : "No whitelist for this week yet.")}
                 </p>
               </div>
               <div className="text-right font-mono-data">
-                <div className="text-[10px] uppercase tracking-widest">Suspicious today</div>
+                <div className="text-[10px] uppercase tracking-widest">Suspicious</div>
                 <div className="text-4xl font-bold" data-testid="suspicious-count">{suspicious.length}</div>
               </div>
             </div>
           </div>
 
+          {mode === "week" && (
+            <div className="card-sharp p-5" data-testid="week-grid">
+              <h2 className="font-heading text-xl mb-3">Week overview</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
+                {dates.map((d, i) => (
+                  <div key={d} className="border border-zinc-200 p-2 flex flex-col items-center" data-testid={`week-day-${i}`}>
+                    <div className="font-heading text-[10px] tracking-widest text-zinc-500">{WEEKDAY_LABELS[i]}</div>
+                    <div className="font-mono-data text-[10px] text-zinc-500">{d.slice(5)}</div>
+                    <div className="mt-1 font-heading text-2xl">{dayTotals[d] || 0}</div>
+                    {perDayPreview[d] > 0 && (
+                      <div className="mt-1 text-[10px] uppercase tracking-widest bg-yellow-500 text-zinc-950 px-1 font-bold">
+                        +{perDayPreview[d]}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="card-sharp p-5" data-testid="suspicious-card">
             <div className="flex items-center justify-between mb-3">
               <h2 className="font-heading text-xl">Suspicious scans</h2>
-              <span className="text-xs text-zinc-500">Barcodes scanned but NOT on the whitelist</span>
+              <span className="text-xs text-zinc-500">
+                {mode === "day" ? `On ${dateStr}` : `Across week ${week}`}
+              </span>
             </div>
             <div className="overflow-x-auto border border-zinc-200 max-h-[220px] overflow-y-auto">
               <table className="w-full text-sm zebra" data-testid="suspicious-table">
@@ -221,7 +390,7 @@ export default function AdminWhitelist() {
                 <tbody>
                   {suspicious.length === 0 && (
                     <tr><td colSpan={4} className="px-3 py-6 text-center text-zinc-500 text-xs">
-                      {enforcementOn ? "No suspicious scans yet today." : "Upload a whitelist to start flagging."}
+                      {enforcementOn ? "No suspicious scans." : "Upload a whitelist to start flagging."}
                     </td></tr>
                   )}
                   {suspicious.map((s) => (
@@ -237,35 +406,37 @@ export default function AdminWhitelist() {
             </div>
           </div>
 
-          <div className="card-sharp p-5" data-testid="entries-card">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="font-heading text-xl">Whitelist · {dateStr}</h2>
-              <span className="text-xs text-zinc-500">{entries.length} expected barcodes</span>
-            </div>
-            <div className="overflow-x-auto border border-zinc-200 max-h-[260px] overflow-y-auto">
-              <table className="w-full text-sm zebra" data-testid="entries-table">
-                <thead className="bg-zinc-950 text-white sticky top-0">
-                  <tr>
-                    <th className="text-left px-3 py-2 font-heading text-xs">Barcode</th>
-                    <th className="text-left px-3 py-2 font-heading text-xs">Uploaded</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {entries.length === 0 && (
-                    <tr><td colSpan={2} className="px-3 py-6 text-center text-zinc-500 text-xs">No barcodes yet for this day.</td></tr>
-                  )}
-                  {entries.map((b) => (
-                    <tr key={b.barcode} className="border-t border-zinc-100">
-                      <td className="px-3 py-2 font-mono-data text-xs break-all">{b.barcode}</td>
-                      <td className="px-3 py-2 text-[11px] text-zinc-500">
-                        {b.uploaded_by} · {new Date(b.uploaded_at).toLocaleString()}
-                      </td>
+          {mode === "day" && (
+            <div className="card-sharp p-5" data-testid="entries-card">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="font-heading text-xl">Whitelist · {dateStr}</h2>
+                <span className="text-xs text-zinc-500">{entries.length} expected</span>
+              </div>
+              <div className="overflow-x-auto border border-zinc-200 max-h-[260px] overflow-y-auto">
+                <table className="w-full text-sm zebra" data-testid="entries-table">
+                  <thead className="bg-zinc-950 text-white sticky top-0">
+                    <tr>
+                      <th className="text-left px-3 py-2 font-heading text-xs">Barcode</th>
+                      <th className="text-left px-3 py-2 font-heading text-xs">Uploaded</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {entries.length === 0 && (
+                      <tr><td colSpan={2} className="px-3 py-6 text-center text-zinc-500 text-xs">No barcodes yet for this day.</td></tr>
+                    )}
+                    {entries.map((b) => (
+                      <tr key={b.barcode} className="border-t border-zinc-100">
+                        <td className="px-3 py-2 font-mono-data text-xs break-all">{b.barcode}</td>
+                        <td className="px-3 py-2 text-[11px] text-zinc-500">
+                          {b.uploaded_by} · {new Date(b.uploaded_at).toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     </Layout>
