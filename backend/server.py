@@ -122,6 +122,7 @@ class BarcodeGenIn(BaseModel):
     count: int = Field(ge=1, le=500)
     start: int = 1
     pad: int = 4
+    template: str = "a4_3x8"
     add_to_whitelist_date: Optional[str] = None
 
 class BoxReportOut(BaseModel):
@@ -958,38 +959,117 @@ async def payroll_xlsx(period: str = "week", key: Optional[str] = None, _: dict 
     return _xlsx_response(wb, f"payroll_{k}.xlsx")
 
 # ---------- Barcode label generator ----------
-def _build_barcodes_pdf(codes: list) -> bytes:
+LABEL_TEMPLATES = {
+    "a4_3x8": {
+        "label": "A4 · 3×8 (24 per page) — default",
+        "page": "A4", "cols": 3, "rows": 8,
+        "top_mm": 12, "left_mm": 10, "cell_w_mm": None, "cell_h_mm": None,
+        "gap_x_mm": 0, "gap_y_mm": 0,
+    },
+    "avery_l7159_a4": {
+        "label": "Avery L7159 · A4 · 3×8 (24, 63.5×33.9mm)",
+        "page": "A4", "cols": 3, "rows": 8,
+        "top_mm": 13.3, "left_mm": 7.21, "cell_w_mm": 63.5, "cell_h_mm": 33.9,
+        "gap_x_mm": 2.54, "gap_y_mm": 0,
+    },
+    "avery_l7160_a4": {
+        "label": "Avery L7160 · A4 · 3×7 (21, 63.5×38.1mm)",
+        "page": "A4", "cols": 3, "rows": 7,
+        "top_mm": 15.15, "left_mm": 7.21, "cell_w_mm": 63.5, "cell_h_mm": 38.1,
+        "gap_x_mm": 2.54, "gap_y_mm": 0,
+    },
+    "avery_l7163_a4": {
+        "label": "Avery L7163 · A4 · 2×7 (14, 99.1×38.1mm)",
+        "page": "A4", "cols": 2, "rows": 7,
+        "top_mm": 15.15, "left_mm": 4.65, "cell_w_mm": 99.1, "cell_h_mm": 38.1,
+        "gap_x_mm": 2.54, "gap_y_mm": 0,
+    },
+    "avery_5160_letter": {
+        "label": "Avery 5160 · US Letter · 3×10 (30, 2.625×1in)",
+        "page": "LETTER", "cols": 3, "rows": 10,
+        "top_mm": 12.7, "left_mm": 4.85, "cell_w_mm": 66.68, "cell_h_mm": 25.4,
+        "gap_x_mm": 3.05, "gap_y_mm": 0,
+    },
+    "avery_5163_letter": {
+        "label": "Avery 5163 · US Letter · 2×5 (10, 4×2in)",
+        "page": "LETTER", "cols": 2, "rows": 5,
+        "top_mm": 12.7, "left_mm": 4.85, "cell_w_mm": 101.6, "cell_h_mm": 50.8,
+        "gap_x_mm": 3.18, "gap_y_mm": 0,
+    },
+    "letter_3x8": {
+        "label": "US Letter · 3×8 (24 per page, full-page)",
+        "page": "LETTER", "cols": 3, "rows": 8,
+        "top_mm": 12, "left_mm": 10, "cell_w_mm": None, "cell_h_mm": None,
+        "gap_x_mm": 0, "gap_y_mm": 0,
+    },
+}
+
+@api.get("/barcodes/templates")
+async def barcode_templates(_: dict = Depends(require_admin)):
+    return {
+        "templates": [
+            {"key": k, **{kk: vv for kk, vv in v.items()}, "per_page": v["cols"] * v["rows"]}
+            for k, v in LABEL_TEMPLATES.items()
+        ]
+    }
+
+def _build_barcodes_pdf(codes: list, template_key: str = "a4_3x8") -> bytes:
     from reportlab.pdfgen import canvas
     from reportlab.graphics.barcode import code128
+    from reportlab.lib.pagesizes import A4 as _A4, letter as _LETTER
+    tpl = LABEL_TEMPLATES.get(template_key) or LABEL_TEMPLATES["a4_3x8"]
+    page_size = _A4 if tpl["page"] == "A4" else _LETTER
+    W, H = page_size
+    cols, rows = tpl["cols"], tpl["rows"]
+    top = tpl["top_mm"] * mm
+    left = tpl["left_mm"] * mm
+    gap_x = tpl["gap_x_mm"] * mm
+    gap_y = tpl["gap_y_mm"] * mm
+    if tpl["cell_w_mm"] and tpl["cell_h_mm"]:
+        cell_w = tpl["cell_w_mm"] * mm
+        cell_h = tpl["cell_h_mm"] * mm
+    else:
+        cell_w = (W - 2 * left - (cols - 1) * gap_x) / cols
+        cell_h = (H - 2 * top - (rows - 1) * gap_y) / rows
+
+    bar_h = max(6 * mm, min(cell_h * 0.5, 16 * mm))
+    ideal_bar_w = max(0.24, min(0.5, (cell_w * 0.7) / 130))
+    code_font = max(6, min(11, int(cell_h / (5.2 * mm))))
+    brand_font = max(4, code_font - 3)
+
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    W, H = A4
-    cols, rows = 3, 8
-    margin_x, margin_y = 10 * mm, 12 * mm
-    label_w = (W - 2 * margin_x) / cols
-    label_h = (H - 2 * margin_y) / rows
+    c = canvas.Canvas(buf, pagesize=page_size)
+
+    def draw_cell(x, y, code_val):
+        c.setStrokeColorRGB(0.9, 0.9, 0.9)
+        c.setLineWidth(0.3)
+        c.rect(x + 1, y + 1, cell_w - 2, cell_h - 2)
+        bc = code128.Code128(code_val, barHeight=bar_h, barWidth=ideal_bar_w * mm, humanReadable=False)
+        max_bw = cell_w * 0.86
+        if bc.width > max_bw:
+            scale = max_bw / bc.width
+            bc = code128.Code128(code_val, barHeight=bar_h, barWidth=(ideal_bar_w * scale) * mm, humanReadable=False)
+        bc_x = x + (cell_w - bc.width) / 2
+        brand_y = y + 1.5 * mm
+        code_y = brand_y + brand_font + 1
+        bc_y = code_y + code_font + 1
+        bc.drawOn(c, bc_x, bc_y)
+        c.setFont("Helvetica-Bold", code_font)
+        c.setFillColorRGB(0, 0, 0)
+        c.drawCentredString(x + cell_w / 2, code_y, code_val)
+        c.setFont("Helvetica", brand_font)
+        c.setFillColorRGB(0.5, 0.5, 0.5)
+        c.drawCentredString(x + cell_w / 2, brand_y, "BOXWISE")
+
     idx = 0
     while idx < len(codes):
         for row in range(rows):
             for col in range(cols):
                 if idx >= len(codes):
                     break
-                x = margin_x + col * label_w
-                y = H - margin_y - (row + 1) * label_h
-                c.setStrokeColorRGB(0.85, 0.85, 0.85)
-                c.setLineWidth(0.3)
-                c.rect(x + 2, y + 2, label_w - 4, label_h - 4)
-                code_val = codes[idx]
-                bc = code128.Code128(code_val, barHeight=13 * mm, barWidth=0.42 * mm, humanReadable=False)
-                bc_x = x + (label_w - bc.width) / 2
-                bc_y = y + 10 * mm
-                bc.drawOn(c, bc_x, bc_y)
-                c.setFont("Helvetica-Bold", 9)
-                c.setFillColorRGB(0, 0, 0)
-                c.drawCentredString(x + label_w / 2, y + 5 * mm, code_val)
-                c.setFont("Helvetica", 6)
-                c.setFillColorRGB(0.5, 0.5, 0.5)
-                c.drawCentredString(x + label_w / 2, y + 2 * mm, "BOXWISE")
+                x = left + col * (cell_w + gap_x)
+                y = H - top - (row + 1) * cell_h - row * gap_y
+                draw_cell(x, y, codes[idx])
                 idx += 1
         c.showPage()
     c.save()
@@ -1019,8 +1099,8 @@ async def generate_barcodes(body: BarcodeGenIn, user: dict = Depends(require_adm
             await db.whitelist.insert_many(docs)
             added_to_whitelist = len(docs)
 
-    pdf = _build_barcodes_pdf(codes)
-    filename = f"barcodes_{prefix.rstrip('-') or 'BOX'}_{body.start}-{body.start + body.count - 1}.pdf"
+    pdf = _build_barcodes_pdf(codes, body.template)
+    filename = f"barcodes_{prefix.rstrip('-') or 'BOX'}_{body.template}_{body.start}-{body.start + body.count - 1}.pdf"
     return StreamingResponse(
         io.BytesIO(pdf),
         media_type="application/pdf",
