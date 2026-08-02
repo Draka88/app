@@ -117,6 +117,13 @@ class WhitelistBulkIn(BaseModel):
     entries: List[WhitelistEntryIn]
     replace_week: Optional[str] = None  # YYYY-Www to clear before insert
 
+class BarcodeGenIn(BaseModel):
+    prefix: str = "BOX-"
+    count: int = Field(ge=1, le=500)
+    start: int = 1
+    pad: int = 4
+    add_to_whitelist_date: Optional[str] = None
+
 class BoxReportOut(BaseModel):
     id: str
     worker_id: str
@@ -949,6 +956,91 @@ async def payroll_xlsx(period: str = "week", key: Optional[str] = None, _: dict 
         ws.column_dimensions[col].width = wd
 
     return _xlsx_response(wb, f"payroll_{k}.xlsx")
+
+# ---------- Barcode label generator ----------
+def _build_barcodes_pdf(codes: list) -> bytes:
+    from reportlab.pdfgen import canvas
+    from reportlab.graphics.barcode import code128
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+    cols, rows = 3, 8
+    margin_x, margin_y = 10 * mm, 12 * mm
+    label_w = (W - 2 * margin_x) / cols
+    label_h = (H - 2 * margin_y) / rows
+    idx = 0
+    while idx < len(codes):
+        for row in range(rows):
+            for col in range(cols):
+                if idx >= len(codes):
+                    break
+                x = margin_x + col * label_w
+                y = H - margin_y - (row + 1) * label_h
+                c.setStrokeColorRGB(0.85, 0.85, 0.85)
+                c.setLineWidth(0.3)
+                c.rect(x + 2, y + 2, label_w - 4, label_h - 4)
+                code_val = codes[idx]
+                bc = code128.Code128(code_val, barHeight=13 * mm, barWidth=0.42 * mm, humanReadable=False)
+                bc_x = x + (label_w - bc.width) / 2
+                bc_y = y + 10 * mm
+                bc.drawOn(c, bc_x, bc_y)
+                c.setFont("Helvetica-Bold", 9)
+                c.setFillColorRGB(0, 0, 0)
+                c.drawCentredString(x + label_w / 2, y + 5 * mm, code_val)
+                c.setFont("Helvetica", 6)
+                c.setFillColorRGB(0.5, 0.5, 0.5)
+                c.drawCentredString(x + label_w / 2, y + 2 * mm, "BOXWISE")
+                idx += 1
+        c.showPage()
+    c.save()
+    return buf.getvalue()
+
+@api.post("/barcodes/generate")
+async def generate_barcodes(body: BarcodeGenIn, user: dict = Depends(require_admin)):
+    prefix = (body.prefix or "").strip()
+    pad = max(1, min(12, int(body.pad)))
+    codes = [f"{prefix}{str(n).zfill(pad)}" for n in range(body.start, body.start + body.count)]
+    if not codes:
+        raise HTTPException(status_code=400, detail="No codes generated")
+
+    added_to_whitelist = 0
+    if body.add_to_whitelist_date:
+        try:
+            date.fromisoformat(body.add_to_whitelist_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="add_to_whitelist_date must be YYYY-MM-DD")
+        existing = set(await db.whitelist.distinct("barcode", {"date": body.add_to_whitelist_date}))
+        now_s = datetime.now(timezone.utc).isoformat()
+        docs = [
+            {"date": body.add_to_whitelist_date, "barcode": c, "uploaded_by": user["email"], "uploaded_at": now_s}
+            for c in codes if c not in existing
+        ]
+        if docs:
+            await db.whitelist.insert_many(docs)
+            added_to_whitelist = len(docs)
+
+    pdf = _build_barcodes_pdf(codes)
+    filename = f"barcodes_{prefix.rstrip('-') or 'BOX'}_{body.start}-{body.start + body.count - 1}.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Codes-Total": str(len(codes)),
+            "X-Codes-First": codes[0],
+            "X-Codes-Last": codes[-1],
+            "X-Whitelisted": str(added_to_whitelist),
+            "Access-Control-Expose-Headers": "X-Codes-Total, X-Codes-First, X-Codes-Last, X-Whitelisted",
+        },
+    )
+
+@api.post("/barcodes/preview")
+async def preview_barcodes(body: BarcodeGenIn, _: dict = Depends(require_admin)):
+    prefix = (body.prefix or "").strip()
+    pad = max(1, min(12, int(body.pad)))
+    codes = [f"{prefix}{str(n).zfill(pad)}" for n in range(body.start, body.start + body.count)]
+    # Suggest next start number to avoid clashes with existing whitelist barcodes with the same prefix
+    return {"codes": codes, "total": len(codes)}
 
 # ---------- Health ----------
 @api.get("/")
