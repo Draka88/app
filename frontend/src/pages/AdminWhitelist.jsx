@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import { api, formatApiError } from "../lib/api";
+import { api, API, formatApiError } from "../lib/api";
 import { isoWeekKey } from "../lib/format";
 import Layout from "../components/Layout";
 import { toast } from "sonner";
@@ -169,6 +169,37 @@ export default function AdminWhitelist() {
     const raw = await file.text();
     setText((prev) => (prev ? prev + "\n" : "") + raw);
     toast.success(`Loaded ${file.name}`);
+  };
+
+  const downloadRejections = (fmt, all = false) => {
+    const params = new URLSearchParams();
+    if (!all) {
+      if (mode === "day") {
+        params.set("from_date", dateStr);
+        params.set("to_date", dateStr);
+      } else {
+        params.set("from_date", dates[0]);
+        params.set("to_date", dates[6]);
+      }
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const path = `/scans/rejections/${fmt}${suffix}`;
+    fetch(`${API}${path}`, {
+      credentials: "include",
+      headers: { Authorization: `Bearer ${localStorage.getItem("bw_token") || ""}` },
+    })
+      .then((r) => { if (!r.ok) throw new Error("dl"); return r.blob(); })
+      .then((blob) => {
+        const a = document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        a.href = url;
+        const scope = all ? "all" : (mode === "day" ? dateStr : `week_${week}`);
+        a.download = `rejections_${scope}.${fmt}`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        toast.success(`${fmt.toUpperCase()} downloaded`);
+      })
+      .catch(() => toast.error("Download failed"));
   };
 
   const enforcementOn = mode === "day"
@@ -414,11 +445,39 @@ export default function AdminWhitelist() {
           </div>
 
           <div className="card-sharp p-5" data-testid="rejections-card">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
               <h2 className="font-heading text-xl">Rejected scans</h2>
-              <span className="text-xs text-zinc-500">
-                Duplicates blocked from counting · {mode === "day" ? dateStr : `week ${week}`}
-              </span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs text-zinc-500 hidden sm:inline">
+                  Duplicates blocked from counting · {mode === "day" ? dateStr : `week ${week}`}
+                </span>
+                <button
+                  onClick={() => downloadRejections("csv")}
+                  className="btn-outline-ink px-3 py-1.5 text-[11px]"
+                  data-testid="rejections-csv-btn"
+                  disabled={rejections.length === 0}
+                  style={{ opacity: rejections.length === 0 ? 0.4 : 1 }}
+                >
+                  ↓ CSV
+                </button>
+                <button
+                  onClick={() => downloadRejections("pdf")}
+                  className="btn-outline-ink px-3 py-1.5 text-[11px]"
+                  data-testid="rejections-pdf-btn"
+                  disabled={rejections.length === 0}
+                  style={{ opacity: rejections.length === 0 ? 0.4 : 1 }}
+                >
+                  ↓ PDF
+                </button>
+                <button
+                  onClick={() => downloadRejections("csv", true)}
+                  className="text-[11px] text-zinc-700 hover:underline"
+                  data-testid="rejections-all-btn"
+                  title="Download all rejections ever"
+                >
+                  All ↗
+                </button>
+              </div>
             </div>
             <div className="overflow-x-auto border border-zinc-200 max-h-[220px] overflow-y-auto">
               <table className="w-full text-sm zebra" data-testid="rejections-table">

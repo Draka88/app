@@ -389,10 +389,159 @@ async def create_scan(body: ScanIn, user: dict = Depends(get_current_user)):
     return doc
 
 @api.get("/scans/rejections")
-async def scan_rejections(limit: int = 100, _: dict = Depends(require_admin)):
-    limit = max(1, min(500, int(limit)))
-    rows = await db.scan_rejections.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+async def scan_rejections(
+    limit: int = 100,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    _: dict = Depends(require_admin),
+):
+    limit = max(1, min(2000, int(limit)))
+    q: dict = {}
+    if from_date or to_date:
+        rng: dict = {}
+        if from_date:
+            rng["$gte"] = from_date
+        if to_date:
+            rng["$lte"] = to_date
+        q["date"] = rng
+    rows = await db.scan_rejections.find(q, {"_id": 0}).sort("created_at", -1).to_list(limit)
     return rows
+
+def _fetch_rejections(from_date: Optional[str], to_date: Optional[str]):
+    q: dict = {}
+    if from_date or to_date:
+        rng: dict = {}
+        if from_date:
+            rng["$gte"] = from_date
+        if to_date:
+            rng["$lte"] = to_date
+        q["date"] = rng
+    return q
+
+@api.get("/scans/rejections/csv")
+async def rejections_csv(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    _: dict = Depends(require_admin),
+):
+    q = _fetch_rejections(from_date, to_date)
+    rows = await db.scan_rejections.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    def esc(v):
+        s = "" if v is None else str(v)
+        return f'"{s.replace(chr(34), chr(34)+chr(34))}"' if any(ch in s for ch in [',', '"', '\n']) else s
+    lines = [
+        f"# Boxwise Rejection Audit Log",
+        f"# Range: {from_date or 'all'} → {to_date or 'all'}",
+        f"# Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "Rejected At,Date,Worker Attempted,Barcode,Reason,Original Worker,Original Scan Time",
+    ]
+    for r in rows:
+        lines.append(",".join([
+            esc(r.get("created_at")),
+            esc(r.get("date")),
+            esc(r.get("worker_name")),
+            esc(r.get("barcode")),
+            esc(r.get("reason")),
+            esc(r.get("original_worker_name")),
+            esc(r.get("original_scanned_at")),
+        ]))
+    body = "\n".join(lines).encode("utf-8")
+    fname = f"rejections_{from_date or 'all'}_{to_date or 'all'}.csv"
+    return StreamingResponse(
+        io.BytesIO(body),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+@api.get("/scans/rejections/pdf")
+async def rejections_pdf(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    _: dict = Depends(require_admin),
+):
+    q = _fetch_rejections(from_date, to_date)
+    rows = await db.scan_rejections.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=14 * mm, rightMargin=14 * mm,
+        topMargin=14 * mm, bottomMargin=14 * mm,
+    )
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle("t", parent=styles["Title"], fontName="Helvetica-Bold",
+                           fontSize=22, textColor=colors.HexColor("#09090B"), spaceAfter=4)
+    sub = ParagraphStyle("s", parent=styles["Normal"], fontName="Helvetica",
+                         fontSize=10, textColor=colors.HexColor("#71717A"))
+    story = []
+    story.append(Paragraph("REJECTION AUDIT LOG", title))
+    story.append(Paragraph(f"Boxwise Payroll · Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", sub))
+    story.append(Paragraph(f"Range: {from_date or 'all'} → {to_date or 'all'} · {len(rows)} rejected scan(s)", sub))
+    story.append(Spacer(1, 10))
+
+    # Yellow summary banner
+    from collections import Counter
+    workers_ct = Counter(r.get("worker_name") for r in rows)
+    top_workers = ", ".join(f"{w} ({n})" for w, n in workers_ct.most_common(3)) or "—"
+    banner = Table([[
+        Paragraph(f"<font color='#09090B'><b>TOTAL</b></font><br/><font size=18 color='#09090B'><b>{len(rows)}</b></font>", styles["Normal"]),
+        Paragraph(f"<font color='#09090B'><b>UNIQUE BARCODES</b></font><br/><font size=18 color='#09090B'><b>{len({r.get('barcode') for r in rows})}</b></font>", styles["Normal"]),
+        Paragraph(f"<font color='#09090B'><b>TOP OFFENDERS</b></font><br/><font size=10 color='#09090B'><b>{top_workers}</b></font>", styles["Normal"]),
+    ]], colWidths=[55 * mm, 55 * mm, 72 * mm])
+    banner.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EAB308")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(banner)
+    story.append(Spacer(1, 12))
+
+    data = [["Rejected At (UTC)", "Date", "Attempted by", "Barcode", "Reason", "Original by", "Original at"]]
+    if not rows:
+        data.append(["—", "—", "—", "No rejections in this range", "—", "—", "—"])
+    for r in rows:
+        data.append([
+            (r.get("created_at") or "")[:19].replace("T", " "),
+            r.get("date") or "",
+            r.get("worker_name") or "",
+            (r.get("barcode") or "")[:24],
+            r.get("reason") or "",
+            r.get("original_worker_name") or "",
+            (r.get("original_scanned_at") or "")[:19].replace("T", " "),
+        ])
+    tbl = Table(data, colWidths=[32*mm, 20*mm, 26*mm, 30*mm, 25*mm, 24*mm, 32*mm], repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#09090B")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4E4E7")),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FFF7ED")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(
+        "<font size=8 color='#71717A'>Duplicate scans are blocked and do not affect payroll. This log is an "
+        "audit trail for HR investigations only.</font>",
+        styles["Normal"],
+    ))
+    doc.build(story)
+
+    fname = f"rejections_{from_date or 'all'}_{to_date or 'all'}.pdf"
+    return StreamingResponse(
+        io.BytesIO(buf.getvalue()),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 # ---------- Whitelist ----------
 @api.post("/whitelist")
