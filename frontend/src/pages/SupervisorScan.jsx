@@ -1,18 +1,35 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { api, formatApiError } from "../lib/api";
-import { fmtAUD, fmtInt, todayISO } from "../lib/format";
+import { fmtInt, todayISO } from "../lib/format";
 import Layout from "../components/Layout";
 import BarcodeScanner from "../components/BarcodeScanner";
 import { useAuth } from "../contexts/AuthContext";
 import { toast } from "sonner";
 
+const MODES = [
+  { key: "box", label: "+1 Box", desc: "Each scan = 1 completed box" },
+  { key: "clock_in", label: "Clock In", desc: "Start a worker's shift (GPS)" },
+  { key: "clock_out", label: "Clock Out", desc: "End a worker's shift (GPS)" },
+];
+
+function fmtTime(iso) {
+  return iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+}
+
 export default function SupervisorScan() {
   const { user } = useAuth();
+  const [mode, setMode] = useState("box");
   const [scannerOn, setScannerOn] = useState(false);
   const [recentScans, setRecentScans] = useState([]);
   const [dayRows, setDayRows] = useState([]);
   const [dayTotal, setDayTotal] = useState({ boxes: 0, workers: 0 });
   const [lastWorker, setLastWorker] = useState(null);
+  const [lastAttn, setLastAttn] = useState(null);
+  const [worksites, setWorksites] = useState([]);
+  const [worksiteId, setWorksiteId] = useState(""); // "" = auto (nearest)
+  const [gps, setGps] = useState(null); // {lat, lng, accuracy}
+  const [gpsError, setGpsError] = useState(null);
+  const [locating, setLocating] = useState(false);
   const scanBusyRef = useRef(false);
 
   const loadDay = useCallback(async () => {
@@ -29,21 +46,91 @@ export default function SupervisorScan() {
     }
   }, []);
 
+  const loadWorksites = useCallback(async () => {
+    try {
+      const { data } = await api.get("/worksites?only_active=true");
+      setWorksites(data || []);
+    } catch (e) { /* silent */ }
+  }, []);
+
+  useEffect(() => { loadDay(); loadWorksites(); }, [loadDay, loadWorksites]);
   useEffect(() => {
-    loadDay();
     const t = setInterval(loadDay, 5000);
     return () => clearInterval(t);
   }, [loadDay]);
+
+  const requestGps = useCallback(() => new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error("Geolocation not supported on this device"));
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const g = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
+        setGps(g); setGpsError(null); setLocating(false);
+        resolve(g);
+      },
+      (err) => {
+        setLocating(false);
+        const msg = err.code === 1
+          ? "GPS permission denied. Clock In/Out is not allowed without location access."
+          : (err.message || "Unable to get GPS location");
+        setGpsError(msg);
+        reject(new Error(msg));
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
+    );
+  }), []);
+
+  // Refresh GPS when entering an attendance mode
+  useEffect(() => {
+    if (mode === "clock_in" || mode === "clock_out") {
+      requestGps().catch(() => {});
+    } else {
+      setGpsError(null);
+    }
+  }, [mode, requestGps]);
 
   const handleScan = async (qr) => {
     if (scanBusyRef.current) return;
     scanBusyRef.current = true;
     try {
-      const { data } = await api.post("/scans/for-worker", { worker_id: qr });
-      setLastWorker({ ...data.worker, at: new Date().toISOString(), count_today: null });
-      // Update local totals fast
-      loadDay();
-      toast.success(`+1 box · ${data.worker.name}`, { duration: 1400 });
+      if (mode === "box") {
+        const { data } = await api.post("/scans/for-worker", { worker_id: qr });
+        setLastWorker({ ...data.worker, at: new Date().toISOString() });
+        loadDay();
+        toast.success(`+1 box · ${data.worker.name}`, { duration: 1400 });
+      } else {
+        // Clock-in / clock-out: need fresh GPS every scan
+        let g = gps;
+        try {
+          g = await requestGps();
+        } catch (e) {
+          toast.error(e.message);
+          return;
+        }
+        const endpoint = mode === "clock_in" ? "/attendance/scan-clock-in" : "/attendance/scan-clock-out";
+        const payload = {
+          worker_id: qr,
+          latitude: g.lat,
+          longitude: g.lng,
+          accuracy_m: g.accuracy,
+        };
+        if (worksiteId) payload.worksite_id = worksiteId;
+        const { data } = await api.post(endpoint, payload);
+        setLastAttn({
+          mode,
+          name: data.worker?.name || data.worker_name,
+          worksite: data.worksite_name || data.clock_out_worksite_name,
+          time: mode === "clock_in" ? data.clock_in : data.clock_out,
+          hours: data.hours,
+          at: new Date().toISOString(),
+        });
+        toast.success(
+          mode === "clock_in"
+            ? `Clocked IN · ${data.worker?.name || data.worker_name}`
+            : `Clocked OUT · ${data.worker?.name || data.worker_name} · ${data.hours}h`,
+          { description: `Worksite: ${data.worksite_name || data.clock_out_worksite_name}`, duration: 2200 }
+        );
+      }
     } catch (e) {
       const status = e.response?.status;
       const detail = e.response?.data?.detail;
@@ -51,6 +138,11 @@ export default function SupervisorScan() {
         toast.error("Unknown QR code — is this a Boxwise worker tag?");
       } else if (status === 429) {
         toast.warning("Slow down — same worker scanned less than 2s ago");
+      } else if (status === 403 && detail && typeof detail === "object" && detail.message) {
+        toast.error(detail.message, {
+          description: detail.reason,
+          duration: 4200,
+        });
       } else {
         toast.error(formatApiError(detail));
       }
@@ -58,6 +150,8 @@ export default function SupervisorScan() {
       setTimeout(() => { scanBusyRef.current = false; }, 800);
     }
   };
+
+  const attnMode = mode === "clock_in" || mode === "clock_out";
 
   return (
     <Layout>
@@ -68,18 +162,81 @@ export default function SupervisorScan() {
           </div>
           <h1 className="font-heading text-5xl md:text-6xl leading-none">Scan Station</h1>
           <p className="text-zinc-500 mt-2">
-            Scan the worker's QR name tag once per completed box. Every scan adds 1 to their count.
+            Scan a worker's QR name tag. Choose the action below.
           </p>
         </div>
         <div className="text-right font-mono-data">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500">Today</div>
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500">Today · Boxes</div>
           <div className="text-4xl font-bold" data-testid="today-boxes">{fmtInt(dayTotal.boxes)}</div>
-          <div className="text-xs text-zinc-500">boxes · {dayTotal.workers} worker{dayTotal.workers === 1 ? "" : "s"}</div>
+          <div className="text-xs text-zinc-500">{dayTotal.workers} worker{dayTotal.workers === 1 ? "" : "s"}</div>
         </div>
       </div>
 
-      {/* Big last-scanned card */}
-      {lastWorker && (
+      {/* Mode toggle */}
+      <div className="mb-6 grid grid-cols-3 gap-2" data-testid="mode-toggle">
+        {MODES.map((m) => (
+          <button
+            key={m.key}
+            onClick={() => setMode(m.key)}
+            className={`p-3 border-2 text-left ${mode === m.key ? "bg-zinc-950 text-white border-zinc-950" : "bg-white border-zinc-300 hover:border-zinc-950"}`}
+            data-testid={`mode-${m.key}`}
+          >
+            <div className="font-heading text-sm md:text-base tracking-widest">{m.label.toUpperCase()}</div>
+            <div className={`text-[10px] md:text-xs mt-1 ${mode === m.key ? "text-zinc-300" : "text-zinc-500"}`}>{m.desc}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Attendance controls: GPS + worksite selection */}
+      {attnMode && (
+        <div className="card-sharp p-4 mb-6" data-testid="attendance-controls">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label className="block font-heading text-xs mb-1 text-zinc-700">Worksite</label>
+              <select
+                value={worksiteId}
+                onChange={(e) => setWorksiteId(e.target.value)}
+                className="input-sharp w-full"
+                data-testid="worksite-select"
+              >
+                <option value="">Auto-detect nearest</option>
+                {worksites.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name} · {w.radius_m}m
+                  </option>
+                ))}
+              </select>
+              {worksites.length === 0 && (
+                <div className="text-[11px] text-red-600 mt-1">No worksites registered. Ask admin to add one.</div>
+              )}
+            </div>
+            <div>
+              <label className="block font-heading text-xs mb-1 text-zinc-700">Your GPS</label>
+              <div className="input-sharp w-full font-mono-data text-xs">
+                {gps ? `${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)} ±${Math.round(gps.accuracy)}m` : (locating ? "Locating…" : "—")}
+              </div>
+            </div>
+            <div>
+              <button
+                onClick={() => requestGps().catch((e) => toast.error(e.message))}
+                className="btn-outline-ink px-4 py-2 text-xs w-full"
+                disabled={locating}
+                data-testid="refresh-gps-btn"
+              >
+                {locating ? "Locating…" : "◎ Refresh GPS"}
+              </button>
+            </div>
+          </div>
+          {gpsError && (
+            <div className="mt-3 border-2 border-red-500 bg-red-50 p-3 text-xs text-red-800" data-testid="gps-error">
+              <b>Location required:</b> {gpsError}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Big last-action card */}
+      {mode === "box" && lastWorker && (
         <div className="card-sharp p-5 mb-6 bg-yellow-500 border-yellow-500" data-testid="last-worker-card">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div>
@@ -94,6 +251,25 @@ export default function SupervisorScan() {
           </div>
         </div>
       )}
+      {attnMode && lastAttn && (
+        <div className="card-sharp p-5 mb-6 bg-yellow-500 border-yellow-500" data-testid="last-attn-card">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <div className="font-heading text-xs tracking-widest text-zinc-900">
+                LAST · {lastAttn.mode === "clock_in" ? "CLOCK IN" : "CLOCK OUT"}
+              </div>
+              <div className="font-heading text-4xl leading-none">{lastAttn.name}</div>
+              <div className="mt-1 text-xs uppercase tracking-widest text-zinc-800">
+                {lastAttn.worksite} {lastAttn.hours != null && `· ${lastAttn.hours}h`}
+              </div>
+            </div>
+            <div className="font-mono-data text-right">
+              <div className="text-[10px] uppercase tracking-widest">at</div>
+              <div className="text-2xl font-bold">{fmtTime(lastAttn.time)}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Scanner column */}
@@ -102,10 +278,19 @@ export default function SupervisorScan() {
             <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
               <div>
                 <h2 className="font-heading text-xl">QR Scanner</h2>
-                <p className="text-xs text-zinc-500">Point camera at worker name tag</p>
+                <p className="text-xs text-zinc-500">
+                  {mode === "box" && "Each QR = +1 box"}
+                  {mode === "clock_in" && "Scan to CLOCK IN the worker"}
+                  {mode === "clock_out" && "Scan to CLOCK OUT the worker"}
+                </p>
               </div>
               {!scannerOn ? (
-                <button onClick={() => setScannerOn(true)} className="btn-yellow px-4 py-2.5 text-xs" data-testid="start-scanner-button">
+                <button
+                  onClick={() => setScannerOn(true)}
+                  className="btn-yellow px-4 py-2.5 text-xs"
+                  data-testid="start-scanner-button"
+                  disabled={attnMode && (!gps || worksites.length === 0)}
+                >
                   ▶ Start scanning
                 </button>
               ) : (
@@ -119,7 +304,9 @@ export default function SupervisorScan() {
             ) : (
               <div className="border-2 border-dashed border-zinc-300 p-8 text-center text-zinc-500 text-sm" data-testid="scanner-idle">
                 <div className="font-heading text-2xl text-zinc-950 mb-1">READY</div>
-                Tap "Start scanning" to open the camera. Each QR = +1 box for that worker.
+                {mode === "box" && "Tap Start. Each QR = +1 box for that worker."}
+                {mode === "clock_in" && (gps ? "Tap Start. Each QR clocks that worker in." : "GPS required before starting.")}
+                {mode === "clock_out" && (gps ? "Tap Start. Each QR clocks that worker out." : "GPS required before starting.")}
               </div>
             )}
           </div>

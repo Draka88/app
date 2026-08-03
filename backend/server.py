@@ -5,6 +5,7 @@ load_dotenv(ROOT_DIR / ".env")
 
 import os
 import io
+import math
 import logging
 import uuid
 import bcrypt
@@ -149,6 +150,27 @@ class PayConfigIn(BaseModel):
 
 class AttendanceCorrectIn(BaseModel):
     hours: float = Field(ge=0, le=24)
+
+class WorksiteIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    latitude: float
+    longitude: float
+    radius_m: int = Field(ge=5, le=5000, default=50)
+    active: bool = True
+
+class WorksiteUpdate(BaseModel):
+    name: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    radius_m: Optional[int] = Field(default=None, ge=5, le=5000)
+    active: Optional[bool] = None
+
+class ScanClockIn(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=200)
+    latitude: float
+    longitude: float
+    accuracy_m: Optional[float] = None
+    worksite_id: Optional[str] = None
 
 # ---------- Auth dependency ----------
 async def get_current_user(request: Request) -> dict:
@@ -366,6 +388,32 @@ async def delete_pay_config(worker_id: str, date_: str, _: dict = Depends(requir
     return {"deleted": res.deleted_count}
 
 # ---------- Attendance (clock-in / clock-out) ----------
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371000.0
+    p1 = math.radians(lat1); p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1); dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+async def _resolve_worksite(lat: float, lng: float, worksite_id: Optional[str]):
+    """Return (worksite_doc, distance_m, error_msg). If worksite_id is provided, only that site is checked."""
+    if worksite_id:
+        ws = await db.worksites.find_one({"id": worksite_id, "active": True}, {"_id": 0})
+        if not ws:
+            return None, None, "Selected work location is not available"
+        d = _haversine_m(lat, lng, ws["latitude"], ws["longitude"])
+        if d <= ws["radius_m"]:
+            return ws, d, None
+        return None, d, f"You are {int(d)}m from {ws['name']} (allowed radius {ws['radius_m']}m)"
+    # No explicit site → find nearest active site whose radius contains us
+    best = None; best_d = None
+    async for ws in db.worksites.find({"active": True}, {"_id": 0}):
+        d = _haversine_m(lat, lng, ws["latitude"], ws["longitude"])
+        if d <= ws["radius_m"] and (best_d is None or d < best_d):
+            best = ws; best_d = d
+    if best is None:
+        return None, None, "You are outside every registered work location"
+    return best, best_d, None
 async def _sync_pay_config_hours(worker_id: str, worker_name: str, date_s: str, hours: float, user_email: str):
     existing = await db.pay_configs.find_one({"worker_id": worker_id, "date": date_s})
     now_s = datetime.now(timezone.utc).isoformat()
@@ -474,6 +522,324 @@ async def correct_attendance(att_id: str, body: AttendanceCorrectIn, user: dict 
     # Cascade to pay_configs
     await _sync_pay_config_hours(existing["worker_id"], existing["worker_name"], existing["date"], hours, user["email"])
     return {"id": att_id, "hours": hours}
+
+# ---------- Worksites (geofence) ----------
+@api.get("/worksites")
+async def list_worksites(only_active: bool = False, user: dict = Depends(get_current_user)):
+    q = {"active": True} if only_active else {}
+    rows = await db.worksites.find(q, {"_id": 0}).sort([("active", -1), ("name", 1)]).to_list(500)
+    return rows
+
+@api.post("/worksites")
+async def create_worksite(body: WorksiteIn, user: dict = Depends(require_admin)):
+    if not (-90 <= body.latitude <= 90) or not (-180 <= body.longitude <= 180):
+        raise HTTPException(status_code=400, detail="Invalid coordinates")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": body.name.strip(),
+        "latitude": float(body.latitude),
+        "longitude": float(body.longitude),
+        "radius_m": int(body.radius_m),
+        "active": bool(body.active),
+        "created_by": user["email"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.worksites.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.patch("/worksites/{worksite_id}")
+async def update_worksite(worksite_id: str, body: WorksiteUpdate, user: dict = Depends(require_admin)):
+    update: dict = {}
+    if body.name is not None:
+        update["name"] = body.name.strip()
+    if body.latitude is not None:
+        if not (-90 <= body.latitude <= 90):
+            raise HTTPException(status_code=400, detail="Invalid latitude")
+        update["latitude"] = float(body.latitude)
+    if body.longitude is not None:
+        if not (-180 <= body.longitude <= 180):
+            raise HTTPException(status_code=400, detail="Invalid longitude")
+        update["longitude"] = float(body.longitude)
+    if body.radius_m is not None:
+        update["radius_m"] = int(body.radius_m)
+    if body.active is not None:
+        update["active"] = bool(body.active)
+    if not update:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    update["updated_by"] = user["email"]
+    res = await db.worksites.update_one({"id": worksite_id}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Worksite not found")
+    saved = await db.worksites.find_one({"id": worksite_id}, {"_id": 0})
+    return saved
+
+@api.delete("/worksites/{worksite_id}")
+async def delete_worksite(worksite_id: str, _: dict = Depends(require_admin)):
+    res = await db.worksites.delete_one({"id": worksite_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Worksite not found")
+    return {"ok": True}
+
+# ---------- Supervisor-driven, geofenced clock-in / clock-out ----------
+def _extract_worker_id(payload: str) -> str:
+    v = (payload or "").strip()
+    if v.startswith("BW-W:"):
+        v = v[5:]
+    return v
+
+@api.post("/attendance/scan-clock-in")
+async def scan_clock_in(body: ScanClockIn, user: dict = Depends(require_admin)):
+    """Supervisor scans a worker's QR to clock them IN. Requires supervisor's GPS to be inside a worksite radius."""
+    wid = _extract_worker_id(body.worker_id)
+    worker = await db.users.find_one({"id": wid, "role": "worker"}, {"_id": 0, "password_hash": 0})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found for this QR code")
+
+    site, dist, err = await _resolve_worksite(body.latitude, body.longitude, body.worksite_id)
+    if err:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "You are outside the designated work location. Clock In/Clock Out is not allowed.",
+                "reason": err,
+                "distance_m": None if dist is None else int(dist),
+            },
+        )
+
+    today_s = date.today().isoformat()
+    existing = await db.attendance.find_one({"worker_id": worker["id"], "date": today_s})
+    if existing:
+        if existing.get("clock_out"):
+            raise HTTPException(status_code=409, detail=f"{worker['name']}'s shift is already completed for today")
+        raise HTTPException(status_code=409, detail=f"{worker['name']} is already clocked in")
+
+    now = datetime.now(timezone.utc)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "worker_id": worker["id"],
+        "worker_name": worker["name"],
+        "date": today_s,
+        "clock_in": now.isoformat(),
+        "clock_out": None,
+        "hours": None,
+        "clock_in_lat": float(body.latitude),
+        "clock_in_lng": float(body.longitude),
+        "clock_in_accuracy_m": float(body.accuracy_m) if body.accuracy_m is not None else None,
+        "clock_in_distance_m": int(dist) if dist is not None else None,
+        "worksite_id": site["id"],
+        "worksite_name": site["name"],
+        "worksite_lat": site["latitude"],
+        "worksite_lng": site["longitude"],
+        "worksite_radius_m": site["radius_m"],
+        "supervisor_id": user["id"],
+        "supervisor_name": user["name"],
+        "supervisor_email": user["email"],
+        "updated_at": now.isoformat(),
+    }
+    await db.attendance.insert_one(doc)
+    doc.pop("_id", None)
+    return {**doc, "worker": {"id": worker["id"], "name": worker["name"], "job_role": worker.get("job_role")}}
+
+@api.post("/attendance/scan-clock-out")
+async def scan_clock_out(body: ScanClockIn, user: dict = Depends(require_admin)):
+    """Supervisor scans a worker's QR to clock them OUT."""
+    wid = _extract_worker_id(body.worker_id)
+    worker = await db.users.find_one({"id": wid, "role": "worker"}, {"_id": 0, "password_hash": 0})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found for this QR code")
+
+    site, dist, err = await _resolve_worksite(body.latitude, body.longitude, body.worksite_id)
+    if err:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "You are outside the designated work location. Clock In/Clock Out is not allowed.",
+                "reason": err,
+                "distance_m": None if dist is None else int(dist),
+            },
+        )
+
+    today_s = date.today().isoformat()
+    existing = await db.attendance.find_one({"worker_id": worker["id"], "date": today_s})
+    if not existing:
+        raise HTTPException(status_code=400, detail=f"{worker['name']} is not clocked in today")
+    if existing.get("clock_out"):
+        raise HTTPException(status_code=409, detail=f"{worker['name']} has already clocked out today")
+
+    now = datetime.now(timezone.utc)
+    ci = datetime.fromisoformat(existing["clock_in"])
+    hours = max(0.0, round((now - ci).total_seconds() / 3600, 2))
+    await db.attendance.update_one(
+        {"id": existing["id"]},
+        {"$set": {
+            "clock_out": now.isoformat(),
+            "hours": hours,
+            "clock_out_lat": float(body.latitude),
+            "clock_out_lng": float(body.longitude),
+            "clock_out_accuracy_m": float(body.accuracy_m) if body.accuracy_m is not None else None,
+            "clock_out_distance_m": int(dist) if dist is not None else None,
+            "clock_out_worksite_id": site["id"],
+            "clock_out_worksite_name": site["name"],
+            "clock_out_supervisor_id": user["id"],
+            "clock_out_supervisor_name": user["name"],
+            "updated_at": now.isoformat(),
+        }},
+    )
+    await _sync_pay_config_hours(worker["id"], worker["name"], today_s, hours, user["email"])
+    updated = await db.attendance.find_one({"id": existing["id"]}, {"_id": 0})
+    return {**updated, "worker": {"id": worker["id"], "name": worker["name"], "job_role": worker.get("job_role")}}
+
+# ---------- Attendance exports ----------
+@api.get("/attendance/xlsx")
+async def attendance_xlsx(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    _: dict = Depends(require_admin),
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    q: dict = {}
+    if from_date or to_date:
+        rng: dict = {}
+        if from_date: rng["$gte"] = from_date
+        if to_date: rng["$lte"] = to_date
+        q["date"] = rng
+    rows = await db.attendance.find(q, {"_id": 0}).sort([("date", 1), ("clock_in", 1)]).to_list(10000)
+
+    wb = Workbook(); ws = wb.active; ws.title = "Attendance"
+    yellow = PatternFill(start_color="FFEAB308", end_color="FFEAB308", fill_type="solid")
+    dark = PatternFill(start_color="FF09090B", end_color="FF09090B", fill_type="solid")
+    bold_white = Font(bold=True, color="FFFFFFFF", size=11)
+    bold = Font(bold=True, size=11)
+    thin = Side(border_style="thin", color="FFE4E4E7")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws["A1"] = "ATTENDANCE"; ws["A1"].font = Font(bold=True, size=22)
+    ws["A2"] = f"Range: {from_date or 'all'} → {to_date or 'all'}"; ws["A2"].font = Font(color="FF71717A")
+
+    headers = ["Worker", "Worker ID", "Date", "Clock In", "Clock Out", "Hours",
+               "Worksite", "Worksite GPS", "Clock-In GPS", "Distance (m)",
+               "Supervisor (In)", "Supervisor (Out)"]
+    for i, h in enumerate(headers, 1):
+        c = ws.cell(row=4, column=i, value=h)
+        c.fill = dark; c.font = bold_white; c.alignment = Alignment(horizontal="left")
+
+    r = 5
+    total_hours = 0.0
+    for a in rows:
+        vals = [
+            a.get("worker_name") or "",
+            a.get("worker_id") or "",
+            a.get("date") or "",
+            (a.get("clock_in") or "")[:19].replace("T", " "),
+            (a.get("clock_out") or "")[:19].replace("T", " "),
+            float(a.get("hours") or 0),
+            a.get("worksite_name") or "",
+            f"{a.get('worksite_lat','')},{a.get('worksite_lng','')}" if a.get("worksite_lat") is not None else "",
+            f"{a.get('clock_in_lat','')},{a.get('clock_in_lng','')}" if a.get("clock_in_lat") is not None else "",
+            a.get("clock_in_distance_m") if a.get("clock_in_distance_m") is not None else "",
+            a.get("supervisor_name") or "",
+            a.get("clock_out_supervisor_name") or "",
+        ]
+        for i, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=i, value=v); c.border = border
+        total_hours += float(a.get("hours") or 0)
+        r += 1
+    ws.cell(row=r, column=1, value="TOTAL").font = bold
+    ws.cell(row=r, column=6, value=round(total_hours, 2)).font = bold
+
+    for col, w in zip("ABCDEFGHIJKL", [22, 26, 12, 20, 20, 8, 22, 26, 26, 12, 22, 22]):
+        ws.column_dimensions[col].width = w
+
+    return _xlsx_response(wb, f"attendance_{from_date or 'all'}_{to_date or 'all'}.xlsx")
+
+@api.get("/attendance/pdf")
+async def attendance_pdf(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    _: dict = Depends(require_admin),
+):
+    q: dict = {}
+    if from_date or to_date:
+        rng: dict = {}
+        if from_date: rng["$gte"] = from_date
+        if to_date: rng["$lte"] = to_date
+        q["date"] = rng
+    rows = await db.attendance.find(q, {"_id": 0}).sort([("date", 1), ("clock_in", 1)]).to_list(10000)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
+                            topMargin=12 * mm, bottomMargin=12 * mm)
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle("t", parent=styles["Title"], fontName="Helvetica-Bold",
+                           fontSize=22, textColor=colors.HexColor("#09090B"), spaceAfter=4)
+    sub = ParagraphStyle("s", parent=styles["Normal"], fontName="Helvetica",
+                         fontSize=10, textColor=colors.HexColor("#71717A"))
+    story = []
+    story.append(Paragraph("ATTENDANCE REPORT", title))
+    story.append(Paragraph(f"Boxwise Payroll · Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", sub))
+    story.append(Paragraph(f"Range: {from_date or 'all'} → {to_date or 'all'} · {len(rows)} shift(s)", sub))
+    story.append(Spacer(1, 10))
+
+    total_hours = round(sum(float(a.get("hours") or 0) for a in rows), 2)
+    banner = Table([[
+        Paragraph(f"<font color='#09090B'><b>SHIFTS</b></font><br/><font size=18 color='#09090B'><b>{len(rows)}</b></font>", styles["Normal"]),
+        Paragraph(f"<font color='#09090B'><b>TOTAL HOURS</b></font><br/><font size=18 color='#09090B'><b>{total_hours:.2f}</b></font>", styles["Normal"]),
+        Paragraph(f"<font color='#09090B'><b>WORKERS</b></font><br/><font size=18 color='#09090B'><b>{len({a.get('worker_id') for a in rows})}</b></font>", styles["Normal"]),
+    ]], colWidths=[60 * mm, 60 * mm, 60 * mm])
+    banner.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EAB308")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(banner)
+    story.append(Spacer(1, 12))
+
+    data = [["Date", "Worker", "In", "Out", "Hrs", "Worksite", "GPS (in)", "Dist (m)"]]
+    if not rows:
+        data.append(["—"] * 8)
+    for a in rows:
+        gps_in = ""
+        if a.get("clock_in_lat") is not None:
+            gps_in = f"{a['clock_in_lat']:.5f},{a['clock_in_lng']:.5f}"
+        data.append([
+            a.get("date") or "",
+            a.get("worker_name") or "",
+            (a.get("clock_in") or "")[11:16],
+            (a.get("clock_out") or "")[11:16] if a.get("clock_out") else "—",
+            f"{float(a.get('hours') or 0):.2f}",
+            a.get("worksite_name") or "—",
+            gps_in,
+            str(a.get("clock_in_distance_m")) if a.get("clock_in_distance_m") is not None else "—",
+        ])
+    tbl = Table(data, colWidths=[20*mm, 32*mm, 16*mm, 16*mm, 12*mm, 32*mm, 40*mm, 16*mm], repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#09090B")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4E4E7")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAF9")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(tbl)
+    doc.build(story)
+
+    fname = f"attendance_{from_date or 'all'}_{to_date or 'all'}.pdf"
+    return StreamingResponse(
+        io.BytesIO(buf.getvalue()),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 async def _compute_earnings_for_range(worker_ids: list, from_date: str, to_date: str):
     """Return {worker_id: {days: [...], total_boxes, total_hours, total_earnings, total_scans}}, global_rate."""
@@ -1696,6 +2062,7 @@ async def startup():
     await db.scan_rejections.create_index([("date", 1), ("barcode", 1)])
     await db.pay_configs.create_index([("worker_id", 1), ("date", 1)], unique=True)
     await db.attendance.create_index([("worker_id", 1), ("date", 1)], unique=True)
+    await db.worksites.create_index("id", unique=True)
 
     # Backfill month_key + source for legacy rows (idempotent)
     async for r in db.reports.find({"month_key": {"$exists": False}}):

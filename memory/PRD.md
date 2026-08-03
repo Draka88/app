@@ -1,37 +1,61 @@
-# Boxwise Payroll — PRD
+# Boxwise Payroll — Product Requirements
 
-## Problem Statement
-Workers each report the number of boxes they process. The system must automatically calculate weekly totals per worker for payroll. Admin manually enters the payment rate per box, and each worker's total earnings = boxes reported that week × rate.
+## Original Problem Statement
+Automatically calculate the total number of boxes processed by each worker every week for payroll purposes, using a manually entered payment rate per box (AUD). Export to PDF.
 
-## User Choices (Feb 2026)
-- Auth: Simple JWT worker/admin login (email + password)
-- Reporting: Each worker logs in and reports their own boxes
-- Rate: ONE global rate per box (admin-set)
-- Payslip: Downloadable PDF
-- Currency: AUD
+## Evolved Product Requirements
+**Supervisor-Only Scanning Workflow** — Workers do NOT log in. Supervisors log in and use a smartphone to scan the workers' QR name tags. Each scan counts as 1 completed box for that worker. Payroll is strictly Hourly (working hours × hourly rate). App handles time attendance, shift clocking, barcode generation, whitelisting, and detailed CSV/PDF reporting.
 
-## Architecture
-- Backend: FastAPI + MongoDB (motor), bcrypt + PyJWT auth, reportlab PDF
-- Frontend: React 19 + React Router 7 + Tailwind + shadcn/ui + sonner
-- Design: Industrial safety-yellow / zinc-950 palette, Barlow Condensed headings, IBM Plex Mono for data
+**Location-Based Attendance (NEW — Feb 2026)**
+- Supervisor scans a worker's QR name tag on their phone to Clock In/Out that worker.
+- The Supervisor's phone GPS is used for geo-verification.
+- Admin manages multiple worksites (name, lat/lng, radius in meters, active flag).
+- Default radius: 50m. Attendance is REJECTED if the Supervisor's GPS is outside every active site's radius (or outside the selected site's radius).
+- GPS permission denied → clock-in/out rejected entirely.
+- Every attendance row stores: worker id/name, date, clock_in/out times, GPS coords, distance, assigned worksite, supervising supervisor.
+- Working hours auto-sync into Hourly payroll (pay_configs).
+- Attendance history visible to Admin/Supervisor; Admin can export Excel + PDF.
 
 ## Personas
-1. **Owner / Admin** (soerjantowerri@gmail.com) — sets rate, manages workers, views weekly payroll, exports payslips.
-2. **Worker** — logs boxes daily, views own weekly totals + earnings, downloads own payslip.
+- **Admin/Owner** — manages workers, worksites, payroll config, exports reports.
+- **Supervisor** — logs in on phone, scans worker QR tags for boxes / clock-in / clock-out.
+- **Worker** — has a printed QR name tag only. No login.
 
-## What's Implemented (2026-02)
-- Admin & worker JWT auth with role gating; admin auto-seed on startup
-- Sample workers auto-seeded on first run (Worker A, Worker B)
-- Admin: workers CRUD, global rate setter, weekly payroll dashboard with per-worker totals
-- Worker: daily box report form, weekly log table with delete, week switcher
-- Auto weekly aggregation using ISO weeks (YYYY-Www)
-- Payslip PDF export per worker per week (reportlab)
-- All figures in AUD
+## Implemented (as of Feb 2026)
+- Auth (JWT + Bearer cookie), admin-only worker CRUD
+- Worker QR name tags PDF (2×4 grid)
+- Supervisor Scan Station with three modes: **+1 Box**, **Clock In**, **Clock Out**
+- Attendance history with GPS + worksite stamp, admin exports (XLSX/PDF)
+- Worksite CRUD with "Use my current GPS" helper
+- Geofenced clock-in/out (Haversine distance)
+- Hourly payroll (piece-rate deprecation still pending cleanup)
+- Barcode Whitelisting, Rejection Audit CSV/PDF
+- Barcode Generator (Avery templates)
 
-## Backlog / Next
-- P1: Per-worker rate overrides (opt-in)
-- P1: Monthly payroll view + CSV export
-- P1: Email payslip on generation (Resend)
-- P2: Overtime / holiday-rate multipliers
-- P2: Charts of weekly output per worker
-- P2: Worker self-service password change
+## API — new endpoints
+- `GET /api/worksites` (auth)
+- `POST /api/worksites` (admin)
+- `PATCH /api/worksites/{id}` (admin)
+- `DELETE /api/worksites/{id}` (admin)
+- `POST /api/attendance/scan-clock-in` (admin, geofenced)
+- `POST /api/attendance/scan-clock-out` (admin, geofenced)
+- `GET /api/attendance/xlsx?from_date&to_date`
+- `GET /api/attendance/pdf?from_date&to_date`
+
+## Data model — new
+- **worksites**: `{id, name, latitude, longitude, radius_m, active, created_by/at, updated_by/at}`
+- **attendance** (extended): now includes `clock_in_lat/lng/accuracy_m/distance_m`, `worksite_id/name/lat/lng/radius_m`, `supervisor_id/name/email`, plus `clock_out_lat/lng/accuracy_m/distance_m`, `clock_out_worksite_*`, `clock_out_supervisor_*`.
+
+## Prioritized Backlog
+- **P0** — Supervisor Self-Scan Prevention (block scanning own QR)
+- **P1** — Remove residual Piece-Rate UI/logic from `AdminPayConfig.jsx` + payroll code
+- **P1** — Overtime multiplier (1.5× above 8 hrs/day)
+- **P2** — Direct Print button on QR nametags (no download)
+- **P2** — Bind worksites to specific workers (some workers restricted to certain sites)
+
+## Test Credentials
+See `/app/memory/test_credentials.md`.
+
+## Deployment Notes
+- Production deployment exists. Only preview environment is edited.
+- Backend: `/app/backend/server.py` (single-file FastAPI). Frontend: React under `/app/frontend/src`.
