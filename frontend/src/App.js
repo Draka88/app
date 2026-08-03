@@ -11,6 +11,7 @@ import AdminSettings from "./pages/AdminSettings";
 import AdminReports from "./pages/AdminReports";
 import AdminWhitelist from "./pages/AdminWhitelist";
 import AdminGenerator from "./pages/AdminGenerator";
+import AdminPayConfig from "./pages/AdminPayConfig";
 
 function Loading() {
   return (
@@ -42,6 +43,7 @@ function AppRoutes() {
         <Route path="/workers" element={<AdminWorkers />} />
         <Route path="/whitelist" element={<AdminWhitelist />} />
         <Route path="/generator" element={<AdminGenerator />} />
+        <Route path="/payconfig" element={<AdminPayConfig />} />
         <Route path="/settings" element={<AdminSettings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

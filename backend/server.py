@@ -140,6 +140,13 @@ class BoxReportOut(BaseModel):
 class RateIn(BaseModel):
     rate: float = Field(ge=0)
 
+class PayConfigIn(BaseModel):
+    worker_id: str
+    date: str  # YYYY-MM-DD
+    method: str  # "piece" | "hourly"
+    hours: Optional[float] = None
+    hourly_rate: Optional[float] = None
+
 # ---------- Auth dependency ----------
 async def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
@@ -294,6 +301,115 @@ async def set_rate(body: RateIn, _: dict = Depends(require_admin)):
         upsert=True,
     )
     return {"rate": float(body.rate)}
+
+# ---------- Pay method configs (per worker, per day) ----------
+@api.get("/pay-configs")
+async def list_pay_configs(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    _: dict = Depends(require_admin),
+):
+    q: dict = {}
+    if from_date or to_date:
+        rng: dict = {}
+        if from_date: rng["$gte"] = from_date
+        if to_date: rng["$lte"] = to_date
+        q["date"] = rng
+    if worker_id:
+        q["worker_id"] = worker_id
+    rows = await db.pay_configs.find(q, {"_id": 0}).sort([("date", -1), ("worker_id", 1)]).to_list(5000)
+    return rows
+
+@api.put("/pay-configs")
+async def upsert_pay_config(body: PayConfigIn, user: dict = Depends(require_admin)):
+    if body.method not in ("piece", "hourly"):
+        raise HTTPException(status_code=400, detail="method must be 'piece' or 'hourly'")
+    try:
+        date.fromisoformat(body.date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    worker = await db.users.find_one({"id": body.worker_id, "role": "worker"}, {"_id": 0})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "worker_id": body.worker_id,
+        "worker_name": worker["name"],
+        "date": body.date,
+        "method": body.method,
+        "hours": float(body.hours or 0) if body.method == "hourly" else 0.0,
+        "hourly_rate": float(body.hourly_rate or 0) if body.method == "hourly" else 0.0,
+        "updated_by": user["email"],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.pay_configs.update_one(
+        {"worker_id": body.worker_id, "date": body.date},
+        {"$set": {k: v for k, v in doc.items() if k != "id"}, "$setOnInsert": {"id": doc["id"]}},
+        upsert=True,
+    )
+    saved = await db.pay_configs.find_one({"worker_id": body.worker_id, "date": body.date}, {"_id": 0})
+    return saved
+
+@api.delete("/pay-configs")
+async def delete_pay_config(worker_id: str, date_: str, _: dict = Depends(require_admin)):
+    res = await db.pay_configs.delete_one({"worker_id": worker_id, "date": date_})
+    return {"deleted": res.deleted_count}
+
+async def _compute_earnings_for_range(worker_ids: list, from_date: str, to_date: str):
+    """Return {worker_id: {days: [...], total_boxes, total_hours, total_earnings, total_scans}}, global_rate."""
+    global_rate = await _rate()
+    pipeline = [
+        {"$match": {"worker_id": {"$in": worker_ids}, "date": {"$gte": from_date, "$lte": to_date}}},
+        {"$group": {
+            "_id": {"worker_id": "$worker_id", "date": "$date"},
+            "boxes": {"$sum": "$boxes"},
+            "scans": {"$sum": {"$cond": [{"$eq": ["$source", "scan"]}, 1, 0]}},
+        }},
+    ]
+    boxes_map = {}
+    async for a in db.reports.aggregate(pipeline):
+        boxes_map[(a["_id"]["worker_id"], a["_id"]["date"])] = {"boxes": int(a["boxes"]), "scans": int(a["scans"])}
+    cfgs = await db.pay_configs.find(
+        {"worker_id": {"$in": worker_ids}, "date": {"$gte": from_date, "$lte": to_date}},
+        {"_id": 0},
+    ).to_list(10000)
+    cfg_map = {(c["worker_id"], c["date"]): c for c in cfgs}
+
+    keys = set(boxes_map.keys()) | set(cfg_map.keys())
+    per_worker = {w: {"days": [], "total_boxes": 0, "total_hours": 0.0, "total_earnings": 0.0, "total_scans": 0} for w in worker_ids}
+    for w, d in sorted(keys):
+        if w not in per_worker:
+            continue
+        b = boxes_map.get((w, d), {"boxes": 0, "scans": 0})
+        cfg = cfg_map.get((w, d))
+        method = (cfg or {}).get("method", "piece")
+        if method == "hourly":
+            hours = float((cfg or {}).get("hours") or 0)
+            rate = float((cfg or {}).get("hourly_rate") or 0)
+            earn = round(hours * rate, 2)
+        else:
+            hours = 0.0
+            rate = 0.0
+            earn = round(b["boxes"] * global_rate, 2)
+        per_worker[w]["days"].append({
+            "date": d,
+            "method": method,
+            "boxes": b["boxes"],
+            "scans": b["scans"],
+            "hours": hours,
+            "hourly_rate": rate,
+            "piece_rate": global_rate if method == "piece" else 0.0,
+            "earnings": earn,
+        })
+        per_worker[w]["total_boxes"] += b["boxes"]
+        per_worker[w]["total_scans"] += b["scans"]
+        per_worker[w]["total_hours"] += hours
+        per_worker[w]["total_earnings"] += earn
+    for w in per_worker:
+        per_worker[w]["total_earnings"] = round(per_worker[w]["total_earnings"], 2)
+        per_worker[w]["total_hours"] = round(per_worker[w]["total_hours"], 2)
+    return per_worker, global_rate
 
 # ---------- Reports ----------
 @api.post("/reports", response_model=BoxReportOut)
@@ -718,13 +834,19 @@ async def period_summary(
     today = date.today()
     if period == "day":
         k = key or today.isoformat()
-        match_key = "date"
+        from_d = to_d = k
     elif period == "month":
         k = key or month_key(today)
-        match_key = "month_key"
+        y, m = k.split("-"); y = int(y); m = int(m)
+        from_d = date(y, m, 1).isoformat()
+        if m == 12:
+            to_d = (date(y + 1, 1, 1) - td(days=1)).isoformat()
+        else:
+            to_d = (date(y, m + 1, 1) - td(days=1)).isoformat()
     else:
         k = key or iso_week_key(today)
-        match_key = "week_key"
+        monday, sunday = week_range(k)
+        from_d = monday.isoformat(); to_d = sunday.isoformat()
 
     is_admin = user["role"] == "admin"
     if is_admin:
@@ -733,38 +855,36 @@ async def period_summary(
         me = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
         workers = [me] if me else []
 
-    pipeline = [
-        {"$match": {match_key: k, **({} if is_admin else {"worker_id": user["id"]})}},
-        {"$group": {
-            "_id": "$worker_id",
-            "boxes": {"$sum": "$boxes"},
-            "scans": {"$sum": {"$cond": [{"$eq": ["$source", "scan"]}, 1, 0]}},
-            "manual": {"$sum": {"$cond": [{"$eq": ["$source", "scan"]}, 0, "$boxes"]}},
-        }},
-    ]
-    agg = await db.reports.aggregate(pipeline).to_list(10000)
-    m = {a["_id"]: a for a in agg}
-    rate = await _rate()
+    per, rate = await _compute_earnings_for_range([w["id"] for w in workers], from_d, to_d)
     rows = []
     for w in workers:
-        st = m.get(w["id"], {"boxes": 0, "scans": 0, "manual": 0})
+        p = per.get(w["id"], {"total_boxes": 0, "total_hours": 0, "total_earnings": 0, "total_scans": 0, "days": []})
+        piece_days = [d for d in p["days"] if d["method"] == "piece"]
+        hourly_days = [d for d in p["days"] if d["method"] == "hourly"]
         rows.append({
             "worker_id": w["id"],
             "name": w["name"],
             "email": w["email"],
             "job_role": w.get("job_role"),
-            "boxes": int(st.get("boxes", 0)),
-            "scans": int(st.get("scans", 0)),
-            "manual": int(st.get("manual", 0)),
-            "earnings": round(int(st.get("boxes", 0)) * rate, 2),
+            "boxes": p["total_boxes"],
+            "scans": p["total_scans"],
+            "manual": max(0, p["total_boxes"] - p["total_scans"]),
+            "hours": p["total_hours"],
+            "piece_days": len(piece_days),
+            "hourly_days": len(hourly_days),
+            "earnings": p["total_earnings"],
+            "days": p["days"],
         })
-    rows.sort(key=lambda r: r["boxes"], reverse=True)
+    rows.sort(key=lambda r: r["earnings"], reverse=True)
     return {
         "period": period,
         "key": k,
+        "from": from_d,
+        "to": to_d,
         "rate": rate,
         "total_boxes": sum(r["boxes"] for r in rows),
         "total_scans": sum(r["scans"] for r in rows),
+        "total_hours": round(sum(r["hours"] for r in rows), 2),
         "total_earnings": round(sum(r["earnings"] for r in rows), 2),
         "rows": rows,
     }
@@ -795,53 +915,48 @@ async def _rate() -> float:
 @api.get("/summary/me")
 async def my_summary(week: Optional[str] = None, user: dict = Depends(get_current_user)):
     wk = week or iso_week_key(date.today())
-    pipeline = [
-        {"$match": {"worker_id": user["id"], "week_key": wk}},
-        {"$group": {"_id": "$worker_id", "boxes": {"$sum": "$boxes"}}},
-    ]
-    agg = await db.reports.aggregate(pipeline).to_list(1)
-    total_boxes = int(agg[0]["boxes"]) if agg else 0
-    rate = await _rate()
     monday, sunday = week_range(wk)
+    per, rate = await _compute_earnings_for_range([user["id"]], monday.isoformat(), sunday.isoformat())
+    p = per.get(user["id"], {"total_boxes": 0, "total_hours": 0, "total_earnings": 0, "days": []})
     return {
         "week_key": wk,
         "week_start": monday.isoformat(),
         "week_end": sunday.isoformat(),
-        "total_boxes": total_boxes,
+        "total_boxes": p["total_boxes"],
+        "total_hours": p["total_hours"],
         "rate": rate,
-        "earnings": round(total_boxes * rate, 2),
+        "earnings": p["total_earnings"],
+        "days": p["days"],
     }
 
 @api.get("/summary/weekly")
 async def weekly_summary(week: Optional[str] = None, _: dict = Depends(require_admin)):
     wk = week or iso_week_key(date.today())
     workers = await db.users.find({"role": "worker"}, {"_id": 0, "password_hash": 0}).to_list(1000)
-    pipeline = [
-        {"$match": {"week_key": wk}},
-        {"$group": {"_id": "$worker_id", "boxes": {"$sum": "$boxes"}}},
-    ]
-    agg = await db.reports.aggregate(pipeline).to_list(10000)
-    boxes_map = {a["_id"]: int(a["boxes"]) for a in agg}
-    rate = await _rate()
     monday, sunday = week_range(wk)
+    per, rate = await _compute_earnings_for_range([w["id"] for w in workers], monday.isoformat(), sunday.isoformat())
     rows = []
     for w in workers:
-        boxes = boxes_map.get(w["id"], 0)
+        p = per.get(w["id"], {"total_boxes": 0, "total_hours": 0, "total_earnings": 0, "days": []})
+        methods = {d["method"] for d in p["days"]} or {"piece"}
         rows.append({
             "worker_id": w["id"],
             "name": w["name"],
             "email": w["email"],
             "job_role": w.get("job_role"),
-            "boxes": boxes,
-            "earnings": round(boxes * rate, 2),
+            "boxes": p["total_boxes"],
+            "hours": p["total_hours"],
+            "methods": sorted(list(methods)),
+            "earnings": p["total_earnings"],
         })
-    rows.sort(key=lambda r: r["boxes"], reverse=True)
+    rows.sort(key=lambda r: r["earnings"], reverse=True)
     return {
         "week_key": wk,
         "week_start": monday.isoformat(),
         "week_end": sunday.isoformat(),
         "rate": rate,
         "total_boxes": sum(r["boxes"] for r in rows),
+        "total_hours": round(sum(r["hours"] for r in rows), 2),
         "total_earnings": round(sum(r["earnings"] for r in rows), 2),
         "rows": rows,
     }
@@ -859,7 +974,7 @@ async def list_weeks(user: dict = Depends(get_current_user)):
 # ---------- Payslip PDF ----------
 def _build_payslip_pdf(*, company: str, worker_name: str, worker_email: str,
                       week_key: str, week_start: str, week_end: str,
-                      rate: float, entries: list, total_boxes: int, earnings: float) -> bytes:
+                      rate: float, days: list, total_boxes: int, total_hours: float, earnings: float) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
                             topMargin=18 * mm, bottomMargin=18 * mm)
@@ -891,32 +1006,40 @@ def _build_payslip_pdf(*, company: str, worker_name: str, worker_email: str,
     story.append(info)
     story.append(Spacer(1, 12))
 
-    # Yellow banner - week totals
     banner = Table([[
-        Paragraph(f"<font color='#09090B'><b>TOTAL BOXES</b></font><br/><font size=18 color='#09090B'><b>{total_boxes}</b></font>", styles["Normal"]),
-        Paragraph(f"<font color='#09090B'><b>RATE / BOX</b></font><br/><font size=18 color='#09090B'><b>A${rate:.2f}</b></font>", styles["Normal"]),
-        Paragraph(f"<font color='#09090B'><b>TOTAL EARNINGS</b></font><br/><font size=18 color='#09090B'><b>A${earnings:.2f}</b></font>", styles["Normal"]),
-    ]], colWidths=[57 * mm, 57 * mm, 57 * mm])
+        Paragraph(f"<font color='#09090B'><b>TOTAL BOXES</b></font><br/><font size=16 color='#09090B'><b>{total_boxes}</b></font>", styles["Normal"]),
+        Paragraph(f"<font color='#09090B'><b>TOTAL HOURS</b></font><br/><font size=16 color='#09090B'><b>{total_hours:.2f}</b></font>", styles["Normal"]),
+        Paragraph(f"<font color='#09090B'><b>PIECE RATE</b></font><br/><font size=16 color='#09090B'><b>A${rate:.2f}</b></font>", styles["Normal"]),
+        Paragraph(f"<font color='#09090B'><b>TOTAL EARNINGS</b></font><br/><font size=16 color='#09090B'><b>A${earnings:.2f}</b></font>", styles["Normal"]),
+    ]], colWidths=[42 * mm, 42 * mm, 42 * mm, 45 * mm])
     banner.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EAB308")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-        ("TOPPADDING", (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]))
     story.append(banner)
     story.append(Spacer(1, 14))
 
-    story.append(Paragraph("<b>DAILY BOX REPORTS</b>", styles["Heading4"]))
-    data = [["Date", "Boxes", "Rate", "Amount (AUD)", "Note"]]
-    for e in entries:
-        data.append([e["date"], str(e["boxes"]), f"A${rate:.2f}", f"A${e['boxes'] * rate:.2f}", e.get("note") or ""])
-    if not entries:
-        data.append(["—", "0", f"A${rate:.2f}", "A$0.00", "No entries this week"])
-    data.append(["TOTAL", str(total_boxes), "", f"A${earnings:.2f}", ""])
+    story.append(Paragraph("<b>DAILY BREAKDOWN</b>", styles["Heading4"]))
+    data = [["Date", "Method", "Boxes", "Hours", "Rate", "Amount (AUD)"]]
+    for d in days:
+        method = d.get("method", "piece")
+        if method == "hourly":
+            rate_str = f"A${d.get('hourly_rate',0):.2f}/hr"
+            amount = f"A${d.get('earnings',0):.2f}"
+            data.append([d["date"], "HOURLY", "—", f"{d.get('hours',0):.2f}", rate_str, amount])
+        else:
+            rate_str = f"A${rate:.2f}/box"
+            amount = f"A${d.get('earnings',0):.2f}"
+            data.append([d["date"], "PIECE", str(d.get("boxes", 0)), "—", rate_str, amount])
+    if not days:
+        data.append(["—", "PIECE", "0", "—", f"A${rate:.2f}/box", "A$0.00"])
+    data.append(["TOTAL", "", str(total_boxes), f"{total_hours:.2f}", "", f"A${earnings:.2f}"])
 
-    tbl = Table(data, colWidths=[28 * mm, 22 * mm, 22 * mm, 30 * mm, 70 * mm])
+    tbl = Table(data, colWidths=[26 * mm, 22 * mm, 20 * mm, 20 * mm, 30 * mm, 32 * mm])
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#09090B")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -925,7 +1048,7 @@ def _build_payslip_pdf(*, company: str, worker_name: str, worker_email: str,
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4E4E7")),
         ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#FAFAFA")),
         ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("ALIGN", (1, 0), (3, -1), "RIGHT"),
+        ("ALIGN", (2, 0), (5, -1), "RIGHT"),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
@@ -933,7 +1056,7 @@ def _build_payslip_pdf(*, company: str, worker_name: str, worker_email: str,
     ]))
     story.append(tbl)
     story.append(Spacer(1, 20))
-    story.append(Paragraph(f"<font size=8 color='#71717A'>Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · Currency: AUD · This payslip is auto-computed from reported box counts × the configured rate.</font>", styles["Normal"]))
+    story.append(Paragraph(f"<font size=8 color='#71717A'>Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · Currency: AUD · Method-aware payroll (Piece / Hourly per day).</font>", styles["Normal"]))
 
     doc.build(story)
     return buf.getvalue()
@@ -946,11 +1069,10 @@ async def payslip_pdf(worker_id: str, week: Optional[str] = None, user: dict = D
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found")
     wk = week or iso_week_key(date.today())
-    entries = await db.reports.find({"worker_id": worker_id, "week_key": wk}, {"_id": 0}).sort("date", 1).to_list(1000)
-    total_boxes = sum(int(e["boxes"]) for e in entries)
-    rate = await _rate()
-    earnings = round(total_boxes * rate, 2)
     monday, sunday = week_range(wk)
+    per, rate = await _compute_earnings_for_range([worker_id], monday.isoformat(), sunday.isoformat())
+    p = per.get(worker_id, {"days": [], "total_boxes": 0, "total_hours": 0, "total_earnings": 0})
+
     pdf_bytes = _build_payslip_pdf(
         company="Boxwise Payroll",
         worker_name=worker["name"],
@@ -959,9 +1081,10 @@ async def payslip_pdf(worker_id: str, week: Optional[str] = None, user: dict = D
         week_start=monday.isoformat(),
         week_end=sunday.isoformat(),
         rate=rate,
-        entries=entries,
-        total_boxes=total_boxes,
-        earnings=earnings,
+        days=p["days"],
+        total_boxes=p["total_boxes"],
+        total_hours=p["total_hours"],
+        earnings=p["total_earnings"],
     )
     filename = f"payslip_{worker['name'].replace(' ', '_')}_{wk}.pdf"
     return StreamingResponse(
@@ -1334,6 +1457,7 @@ async def startup():
     await db.reports.create_index([("source", 1), ("date", 1), ("barcode", 1)])
     await db.scan_rejections.create_index([("created_at", -1)])
     await db.scan_rejections.create_index([("date", 1), ("barcode", 1)])
+    await db.pay_configs.create_index([("worker_id", 1), ("date", 1)], unique=True)
 
     # Backfill month_key + source for legacy rows (idempotent)
     async for r in db.reports.find({"month_key": {"$exists": False}}):
