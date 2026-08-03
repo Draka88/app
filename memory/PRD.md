@@ -51,7 +51,10 @@ Automatically calculate the total number of boxes processed by each worker every
 - **P1** — Remove residual Piece-Rate UI/logic from `AdminPayConfig.jsx` + payroll code
 - **P1** — Overtime multiplier (1.5× above 8 hrs/day)
 - **P2** — Direct Print button on QR nametags (no download)
-- **P2** — Bind worksites to specific workers (some workers restricted to certain sites)
+- **P2** — Live map preview for worksites
+
+## Recently Completed (Feb 2026)
+- Restrict Workers to Sites (P2 → DONE): admin can assign one or more worksites per worker via `PATCH /api/workers/{id}` (`assigned_worksite_ids`). Geofenced clock-in/out is refused with the message "{name} is not permitted to clock in/out at {site}." Empty list = worker allowed at any active site. UI: checkboxes in the Workers roster edit mode.
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`.

@@ -95,6 +95,7 @@ class WorkerUpdate(BaseModel):
     name: Optional[str] = None
     password: Optional[str] = None
     job_role: Optional[str] = None
+    assigned_worksite_ids: Optional[List[str]] = None
 
 class BoxReportIn(BaseModel):
     boxes: int = Field(ge=0)
@@ -303,6 +304,14 @@ async def update_worker(worker_id: str, body: WorkerUpdate, _: dict = Depends(re
         update["password_hash"] = hash_password(body.password)
     if body.job_role is not None:
         update["job_role"] = body.job_role.strip() or None
+    if body.assigned_worksite_ids is not None:
+        ids = [s for s in (body.assigned_worksite_ids or []) if s]
+        if ids:
+            existing_ids = set(await db.worksites.distinct("id", {"id": {"$in": ids}}))
+            unknown = [i for i in ids if i not in existing_ids]
+            if unknown:
+                raise HTTPException(status_code=400, detail=f"Unknown worksite ids: {unknown}")
+        update["assigned_worksite_ids"] = ids
     if not update:
         raise HTTPException(status_code=400, detail="Nothing to update")
     res = await db.users.update_one({"id": worker_id, "role": "worker"}, {"$set": update})
@@ -609,6 +618,16 @@ async def scan_clock_in(body: ScanClockIn, user: dict = Depends(require_admin)):
             },
         )
 
+    assigned = worker.get("assigned_worksite_ids") or []
+    if assigned and site["id"] not in assigned:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": f"{worker['name']} is not permitted to clock in at {site['name']}.",
+                "reason": "worker-not-assigned-to-worksite",
+            },
+        )
+
     today_s = date.today().isoformat()
     existing = await db.attendance.find_one({"worker_id": worker["id"], "date": today_s})
     if existing:
@@ -659,6 +678,16 @@ async def scan_clock_out(body: ScanClockIn, user: dict = Depends(require_admin))
                 "message": "You are outside the designated work location. Clock In/Clock Out is not allowed.",
                 "reason": err,
                 "distance_m": None if dist is None else int(dist),
+            },
+        )
+
+    assigned = worker.get("assigned_worksite_ids") or []
+    if assigned and site["id"] not in assigned:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": f"{worker['name']} is not permitted to clock out at {site['name']}.",
+                "reason": "worker-not-assigned-to-worksite",
             },
         )
 

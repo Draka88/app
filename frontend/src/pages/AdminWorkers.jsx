@@ -17,6 +17,7 @@ const JOB_ROLES = [
 
 export default function AdminWorkers() {
   const [workers, setWorkers] = useState([]);
+  const [worksites, setWorksites] = useState([]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -25,11 +26,16 @@ export default function AdminWorkers() {
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState("");
   const [editRole, setEditRole] = useState("");
+  const [editSiteIds, setEditSiteIds] = useState([]);
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get("/workers");
-      setWorkers(data);
+      const [w, s] = await Promise.all([
+        api.get("/workers"),
+        api.get("/worksites"),
+      ]);
+      setWorkers(w.data);
+      setWorksites(s.data || []);
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail));
     }
@@ -66,6 +72,7 @@ export default function AdminWorkers() {
     setEditingId(w.id);
     setEditName(w.name);
     setEditRole(w.job_role || "");
+    setEditSiteIds(w.assigned_worksite_ids || []);
   };
 
   const saveEdit = async (id) => {
@@ -73,6 +80,7 @@ export default function AdminWorkers() {
       await api.patch(`/workers/${id}`, {
         name: editName.trim(),
         job_role: editRole.trim(),
+        assigned_worksite_ids: editSiteIds,
       });
       toast.success("Worker updated");
       setEditingId(null);
@@ -80,6 +88,10 @@ export default function AdminWorkers() {
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail));
     }
+  };
+
+  const toggleSite = (id) => {
+    setEditSiteIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   };
 
   const resetPw = async (id) => {
@@ -241,6 +253,7 @@ export default function AdminWorkers() {
                 <tr>
                   <th className="text-left px-3 py-2 font-heading text-xs">Name</th>
                   <th className="text-left px-3 py-2 font-heading text-xs">Job role</th>
+                  <th className="text-left px-3 py-2 font-heading text-xs">Assigned sites</th>
                   <th className="text-left px-3 py-2 font-heading text-xs">Email</th>
                   <th className="px-3 py-2"></th>
                 </tr>
@@ -248,7 +261,7 @@ export default function AdminWorkers() {
               <tbody>
                 {workers.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-3 py-10 text-center text-zinc-500">
+                    <td colSpan={5} className="px-3 py-10 text-center text-zinc-500">
                       No workers yet. Add your first worker with the form on the left.
                     </td>
                   </tr>
@@ -289,6 +302,48 @@ export default function AdminWorkers() {
                         </span>
                       ) : (
                         <span className="text-zinc-400 text-xs italic">unassigned</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {editingId === w.id ? (
+                        <div className="space-y-1 max-w-[240px]" data-testid={`edit-sites-${w.id}`}>
+                          {worksites.length === 0 && (
+                            <div className="text-[11px] text-zinc-500 italic">No worksites yet</div>
+                          )}
+                          {worksites.map((s) => (
+                            <label key={s.id} className="flex items-center gap-2 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={editSiteIds.includes(s.id)}
+                                onChange={() => toggleSite(s.id)}
+                                data-testid={`site-toggle-${w.id}-${s.id}`}
+                              />
+                              <span>{s.name}</span>
+                              {!s.active && <span className="text-[9px] text-zinc-400">(inactive)</span>}
+                            </label>
+                          ))}
+                          {editSiteIds.length === 0 && (
+                            <div className="text-[10px] uppercase tracking-widest text-yellow-700 font-bold pt-1">
+                              Empty = allowed at any site
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap gap-1 max-w-[240px]" data-testid={`sites-${w.id}`}>
+                          {(w.assigned_worksite_ids || []).length === 0 ? (
+                            <span className="text-[10px] uppercase tracking-widest text-zinc-500">Any site</span>
+                          ) : (
+                            (w.assigned_worksite_ids || []).map((sid) => {
+                              const s = worksites.find((x) => x.id === sid);
+                              if (!s) return null;
+                              return (
+                                <span key={sid} className="inline-block border border-zinc-900 bg-zinc-950 text-white px-1.5 py-0.5 text-[10px] uppercase tracking-widest font-bold">
+                                  {s.name}
+                                </span>
+                              );
+                            })
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-3 py-2 text-zinc-600">{w.email}</td>
