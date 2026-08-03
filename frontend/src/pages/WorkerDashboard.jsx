@@ -3,6 +3,7 @@ import { api, API, formatApiError } from "../lib/api";
 import { fmtAUD, fmtInt, todayISO, isoWeekKey } from "../lib/format";
 import Layout from "../components/Layout";
 import BarcodeScanner from "../components/BarcodeScanner";
+import ClockInOut from "../components/ClockInOut";
 import { useAuth } from "../contexts/AuthContext";
 import { toast } from "sonner";
 
@@ -153,6 +154,8 @@ export default function WorkerDashboard() {
         <Kpi label="Rate / Box" value={fmtAUD(rate)} testid="kpi-rate" mono />
         <Kpi label="Week Pay" value={fmtAUD(summary?.earnings || 0)} testid="kpi-earnings" accent />
       </div>
+
+      <ClockInOut />
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Scanner column */}

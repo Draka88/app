@@ -142,10 +142,13 @@ class RateIn(BaseModel):
 
 class PayConfigIn(BaseModel):
     worker_id: str
-    date: str  # YYYY-MM-DD
-    method: str  # "piece" | "hourly"
+    date: str
+    method: str
     hours: Optional[float] = None
     hourly_rate: Optional[float] = None
+
+class AttendanceCorrectIn(BaseModel):
+    hours: float = Field(ge=0, le=24)
 
 # ---------- Auth dependency ----------
 async def get_current_user(request: Request) -> dict:
@@ -355,6 +358,116 @@ async def upsert_pay_config(body: PayConfigIn, user: dict = Depends(require_admi
 async def delete_pay_config(worker_id: str, date_: str, _: dict = Depends(require_admin)):
     res = await db.pay_configs.delete_one({"worker_id": worker_id, "date": date_})
     return {"deleted": res.deleted_count}
+
+# ---------- Attendance (clock-in / clock-out) ----------
+async def _sync_pay_config_hours(worker_id: str, worker_name: str, date_s: str, hours: float, user_email: str):
+    existing = await db.pay_configs.find_one({"worker_id": worker_id, "date": date_s})
+    now_s = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "worker_id": worker_id,
+        "worker_name": worker_name,
+        "date": date_s,
+        "method": "hourly",
+        "hours": round(float(hours), 2),
+        "hourly_rate": float(existing["hourly_rate"]) if existing and existing.get("hourly_rate") else 0.0,
+        "updated_by": user_email,
+        "updated_at": now_s,
+        "auto_from_attendance": True,
+    }
+    await db.pay_configs.update_one(
+        {"worker_id": worker_id, "date": date_s},
+        {"$set": doc, "$setOnInsert": {"id": str(uuid.uuid4())}},
+        upsert=True,
+    )
+
+@api.post("/attendance/clock-in")
+async def clock_in(user: dict = Depends(get_current_user)):
+    if user["role"] != "worker":
+        raise HTTPException(status_code=403, detail="Only workers can clock in")
+    today = date.today()
+    today_s = today.isoformat()
+    existing = await db.attendance.find_one({"worker_id": user["id"], "date": today_s})
+    if existing:
+        if existing.get("clock_out"):
+            raise HTTPException(status_code=409, detail="Shift already completed for today")
+        raise HTTPException(status_code=409, detail="Already clocked in")
+    now = datetime.now(timezone.utc)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "worker_id": user["id"],
+        "worker_name": user["name"],
+        "date": today_s,
+        "clock_in": now.isoformat(),
+        "clock_out": None,
+        "hours": None,
+        "updated_at": now.isoformat(),
+    }
+    await db.attendance.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.post("/attendance/clock-out")
+async def clock_out(user: dict = Depends(get_current_user)):
+    if user["role"] != "worker":
+        raise HTTPException(status_code=403, detail="Only workers can clock out")
+    today_s = date.today().isoformat()
+    existing = await db.attendance.find_one({"worker_id": user["id"], "date": today_s})
+    if not existing:
+        raise HTTPException(status_code=400, detail="You are not clocked in")
+    if existing.get("clock_out"):
+        raise HTTPException(status_code=409, detail="Already clocked out")
+    now = datetime.now(timezone.utc)
+    ci = datetime.fromisoformat(existing["clock_in"])
+    hours = max(0.0, round((now - ci).total_seconds() / 3600, 2))
+    await db.attendance.update_one(
+        {"id": existing["id"]},
+        {"$set": {"clock_out": now.isoformat(), "hours": hours, "updated_at": now.isoformat()}},
+    )
+    # Auto-sync into pay_configs so admin sees hours pre-filled on Hourly cells
+    await _sync_pay_config_hours(user["id"], user["name"], today_s, hours, user["email"])
+    return {"id": existing["id"], "clock_in": existing["clock_in"], "clock_out": now.isoformat(), "hours": hours}
+
+@api.get("/attendance/me")
+async def my_attendance(date_: Optional[str] = None, limit: int = 30, user: dict = Depends(get_current_user)):
+    q = {"worker_id": user["id"]}
+    if date_:
+        q["date"] = date_
+        rows = await db.attendance.find(q, {"_id": 0}).to_list(1)
+        return rows[0] if rows else None
+    rows = await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(max(1, min(120, int(limit))))
+    return rows
+
+@api.get("/attendance")
+async def list_attendance(
+    date_: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    _: dict = Depends(require_admin),
+):
+    q: dict = {}
+    if date_:
+        q["date"] = date_
+    elif from_date or to_date:
+        rng: dict = {}
+        if from_date: rng["$gte"] = from_date
+        if to_date: rng["$lte"] = to_date
+        q["date"] = rng
+    rows = await db.attendance.find(q, {"_id": 0}).sort([("date", -1), ("clock_in", 1)]).to_list(5000)
+    return rows
+
+@api.patch("/attendance/{att_id}")
+async def correct_attendance(att_id: str, body: AttendanceCorrectIn, user: dict = Depends(require_admin)):
+    existing = await db.attendance.find_one({"id": att_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Attendance record not found")
+    hours = round(float(body.hours), 2)
+    await db.attendance.update_one(
+        {"id": att_id},
+        {"$set": {"hours": hours, "updated_at": datetime.now(timezone.utc).isoformat(), "corrected_by": user["email"]}},
+    )
+    # Cascade to pay_configs
+    await _sync_pay_config_hours(existing["worker_id"], existing["worker_name"], existing["date"], hours, user["email"])
+    return {"id": att_id, "hours": hours}
 
 async def _compute_earnings_for_range(worker_ids: list, from_date: str, to_date: str):
     """Return {worker_id: {days: [...], total_boxes, total_hours, total_earnings, total_scans}}, global_rate."""
@@ -1458,6 +1571,7 @@ async def startup():
     await db.scan_rejections.create_index([("created_at", -1)])
     await db.scan_rejections.create_index([("date", 1), ("barcode", 1)])
     await db.pay_configs.create_index([("worker_id", 1), ("date", 1)], unique=True)
+    await db.attendance.create_index([("worker_id", 1), ("date", 1)], unique=True)
 
     # Backfill month_key + source for legacy rows (idempotent)
     async for r in db.reports.find({"month_key": {"$exists": False}}):
