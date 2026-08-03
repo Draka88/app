@@ -19,7 +19,7 @@ function fmtTime(iso) {
 export default function SupervisorScan() {
   const { user } = useAuth();
   const [mode, setMode] = useState("box");
-  const [scannerOn, setScannerOn] = useState(false);
+  const [scannerOn, setScannerOn] = useState(true);
   const [recentScans, setRecentScans] = useState([]);
   const [dayRows, setDayRows] = useState([]);
   const [dayTotal, setDayTotal] = useState({ boxes: 0, workers: 0 });
@@ -95,7 +95,19 @@ export default function SupervisorScan() {
     try {
       if (mode === "box") {
         const { data } = await api.post("/scans/for-worker", { worker_id: qr });
-        setLastWorker({ ...data.worker, at: new Date().toISOString() });
+        // Fetch fresh day + week totals for confirmation banner
+        let dayBoxes = null, weekBoxes = null;
+        try {
+          const s = await api.get(`/workers/${data.worker.id}/scan-summary`);
+          dayBoxes = s.data.day_boxes;
+          weekBoxes = s.data.week_boxes;
+        } catch (_) { /* banner will just omit totals */ }
+        setLastWorker({
+          ...data.worker,
+          at: new Date().toISOString(),
+          day_boxes: dayBoxes,
+          week_boxes: weekBoxes,
+        });
         loadDay();
         toast.success(`+1 box · ${data.worker.name}`, { duration: 1400 });
       } else {
@@ -240,15 +252,24 @@ export default function SupervisorScan() {
       {/* Big last-action card */}
       {mode === "box" && lastWorker && (
         <div className="card-sharp p-5 mb-6 bg-yellow-500 border-yellow-500" data-testid="last-worker-card">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div>
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            <div className="min-w-0">
               <div className="font-heading text-xs tracking-widest text-zinc-900">LAST SCAN · +1 BOX</div>
               <div className="font-heading text-4xl leading-none">{lastWorker.name}</div>
               {lastWorker.job_role && <div className="mt-1 text-xs uppercase tracking-widest text-zinc-800">{lastWorker.job_role}</div>}
+              <div className="mt-2 text-xs font-mono-data text-zinc-800">
+                {new Date(lastWorker.at).toLocaleDateString()} · {new Date(lastWorker.at).toLocaleTimeString()}
+              </div>
             </div>
-            <div className="font-mono-data text-right">
-              <div className="text-[10px] uppercase tracking-widest">at</div>
-              <div className="text-2xl font-bold">{new Date(lastWorker.at).toLocaleTimeString()}</div>
+            <div className="flex gap-2">
+              <div className="border-2 border-zinc-950 bg-white px-3 py-2 min-w-[90px]" data-testid="last-day-total">
+                <div className="font-heading text-[9px] tracking-widest text-zinc-600">TODAY</div>
+                <div className="font-heading text-3xl font-bold leading-none">{lastWorker.day_boxes ?? "—"}</div>
+              </div>
+              <div className="border-2 border-zinc-950 bg-zinc-950 text-white px-3 py-2 min-w-[90px]" data-testid="last-week-total">
+                <div className="font-heading text-[9px] tracking-widest">THIS WEEK</div>
+                <div className="font-heading text-3xl font-bold leading-none">{lastWorker.week_boxes ?? "—"}</div>
+              </div>
             </div>
           </div>
         </div>
