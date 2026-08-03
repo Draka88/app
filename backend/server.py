@@ -1168,6 +1168,82 @@ async def _compute_earnings_for_range(worker_ids: list, from_date: str, to_date:
     return per_worker, global_rate
 
 # ---------- Reports ----------
+@api.get("/workers/{worker_id}/scan-summary")
+async def worker_scan_summary(worker_id: str, _: dict = Depends(require_admin)):
+    """Day + week + month totals plus the last 25 scans for a specific worker."""
+    worker = await db.users.find_one({"id": worker_id, "role": "worker"}, {"_id": 0, "password_hash": 0})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    today = date.today()
+    monday, sunday = week_range(iso_week_key(today))
+    mkey = month_key(today)
+
+    agg = await db.reports.aggregate([
+        {"$match": {"worker_id": worker_id}},
+        {"$group": {
+            "_id": None,
+            "day": {"$sum": {"$cond": [{"$eq": ["$date", today.isoformat()]}, "$boxes", 0]}},
+            "week": {"$sum": {"$cond": [
+                {"$and": [
+                    {"$gte": ["$date", monday.isoformat()]},
+                    {"$lte": ["$date", sunday.isoformat()]},
+                ]}, "$boxes", 0]}},
+            "month": {"$sum": {"$cond": [{"$eq": ["$month_key", mkey]}, "$boxes", 0]}},
+            "all_time": {"$sum": "$boxes"},
+        }},
+    ]).to_list(1)
+    tot = agg[0] if agg else {"day": 0, "week": 0, "month": 0, "all_time": 0}
+
+    recent = await db.reports.find(
+        {"worker_id": worker_id, "source": "supervisor_scan"},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(25)
+
+    return {
+        "worker": {
+            "id": worker["id"],
+            "name": worker["name"],
+            "email": worker["email"],
+            "employee_id": worker.get("employee_id"),
+            "job_role": worker.get("job_role"),
+        },
+        "today": today.isoformat(),
+        "week_key": iso_week_key(today),
+        "month_key": mkey,
+        "day_boxes": int(tot.get("day") or 0),
+        "week_boxes": int(tot.get("week") or 0),
+        "month_boxes": int(tot.get("month") or 0),
+        "all_time_boxes": int(tot.get("all_time") or 0),
+        "recent_scans": recent,
+    }
+
+@api.delete("/scans/{scan_id}")
+async def delete_supervisor_scan(scan_id: str, reason: Optional[str] = None, user: dict = Depends(require_admin)):
+    """Supervisor/admin removes an incorrect supervisor_scan. Logged for audit."""
+    scan = await db.reports.find_one({"id": scan_id})
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.get("source") != "supervisor_scan":
+        raise HTTPException(status_code=400, detail="Only supervisor scans can be corrected here")
+    now = datetime.now(timezone.utc)
+    await db.scan_corrections.insert_one({
+        "id": str(uuid.uuid4()),
+        "scan_id": scan_id,
+        "worker_id": scan.get("worker_id"),
+        "worker_name": scan.get("worker_name"),
+        "original_supervisor_id": scan.get("supervisor_id"),
+        "original_supervisor_name": scan.get("supervisor_name"),
+        "corrected_by_id": user["id"],
+        "corrected_by_name": user["name"],
+        "corrected_by_email": user["email"],
+        "reason": (reason or "").strip() or None,
+        "original_created_at": scan.get("created_at"),
+        "corrected_at": now.isoformat(),
+    })
+    await db.reports.delete_one({"id": scan_id})
+    return {"ok": True, "scan_id": scan_id}
+
+# ---------- Legacy report create ----------
 @api.post("/reports", response_model=BoxReportOut)
 async def create_report(body: BoxReportIn, user: dict = Depends(get_current_user)):
     if user["role"] != "worker":

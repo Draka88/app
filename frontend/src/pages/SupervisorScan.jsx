@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { api, formatApiError } from "../lib/api";
 import { fmtInt, todayISO } from "../lib/format";
 import Layout from "../components/Layout";
@@ -316,6 +316,7 @@ export default function SupervisorScan() {
 
         {/* Live totals + recent */}
         <div className="lg:col-span-3 space-y-4">
+          <WorkerLookup />
           <div className="card-sharp p-5">
             <div className="flex items-center justify-between mb-3">
               <h2 className="font-heading text-xl">Today · Live Totals</h2>
@@ -386,5 +387,164 @@ export default function SupervisorScan() {
         </div>
       </div>
     </Layout>
+  );
+}
+
+function WorkerLookup() {
+  const [q, setQ] = useState("");
+  const [workers, setWorkers] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    api.get("/workers").then((r) => setWorkers(r.data || [])).catch(() => {});
+  }, []);
+
+  const matches = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    if (!term) return [];
+    return workers
+      .filter((w) => {
+        const emp = (w.employee_id || "").toLowerCase();
+        return w.name.toLowerCase().includes(term) || emp.includes(term) || (w.email || "").toLowerCase().includes(term);
+      })
+      .slice(0, 8);
+  }, [q, workers]);
+
+  const loadSummary = useCallback(async (id) => {
+    if (!id) return;
+    setLoading(true);
+    try {
+      const { data } = await api.get(`/workers/${id}/scan-summary`);
+      setSummary(data);
+    } catch (e) {
+      toast.error(formatApiError(e.response?.data?.detail));
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { if (selectedId) loadSummary(selectedId); }, [selectedId, loadSummary]);
+
+  const pick = (w) => {
+    setSelectedId(w.id);
+    setQ(`${w.employee_id || ""} · ${w.name}`);
+  };
+
+  const clear = () => { setSelectedId(null); setSummary(null); setQ(""); };
+
+  const deleteScan = async (scanId) => {
+    const reason = window.prompt("Reason for removing this scan (optional):", "");
+    if (reason === null) return; // cancelled
+    try {
+      await api.delete(`/scans/${scanId}${reason ? `?reason=${encodeURIComponent(reason)}` : ""}`);
+      toast.success("Scan removed and logged in audit");
+      loadSummary(selectedId);
+    } catch (e) {
+      toast.error(formatApiError(e.response?.data?.detail));
+    }
+  };
+
+  return (
+    <div className="card-sharp p-5" data-testid="worker-lookup">
+      <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+        <div>
+          <h2 className="font-heading text-xl">Find worker</h2>
+          <p className="text-xs text-zinc-500">Search by name or Employee ID to see today's + weekly totals and scan history.</p>
+        </div>
+        {selectedId && (
+          <button onClick={clear} className="btn-outline-ink px-3 py-1.5 text-xs" data-testid="lookup-clear-btn">Clear</button>
+        )}
+      </div>
+      <div className="relative">
+        <input
+          value={q}
+          onChange={(e) => { setQ(e.target.value); if (selectedId) setSelectedId(null); }}
+          placeholder="Search e.g. EMP-0007 or Worker A"
+          className="input-sharp w-full font-mono-data"
+          data-testid="lookup-search-input"
+        />
+        {matches.length > 0 && !selectedId && (
+          <div className="absolute left-0 right-0 top-full z-10 border-2 border-zinc-900 bg-white shadow-lg max-h-64 overflow-y-auto" data-testid="lookup-suggestions">
+            {matches.map((w) => (
+              <button
+                key={w.id}
+                onClick={() => pick(w)}
+                className="block w-full text-left px-3 py-2 border-b border-zinc-100 hover:bg-yellow-100"
+                data-testid={`lookup-pick-${w.id}`}
+              >
+                <span className="font-mono-data text-xs text-zinc-600 mr-2">{w.employee_id || "—"}</span>
+                <span className="font-heading">{w.name}</span>
+                {w.job_role && <span className="ml-2 text-[10px] uppercase tracking-widest text-zinc-500">{w.job_role}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {loading && <div className="mt-4 text-xs text-zinc-500">Loading…</div>}
+
+      {summary && !loading && (
+        <div className="mt-4 space-y-3" data-testid="lookup-summary">
+          <div className="flex items-center justify-between flex-wrap gap-2 border-b border-zinc-200 pb-2">
+            <div>
+              <div className="font-heading text-2xl leading-none">{summary.worker.name}</div>
+              <div className="text-xs text-zinc-500 font-mono-data mt-1">
+                {summary.worker.employee_id || "—"} · {summary.worker.job_role || "unassigned"}
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-4 gap-2">
+            <MiniStat label="Today" value={summary.day_boxes} testid="lookup-day" />
+            <MiniStat label="This Week" value={summary.week_boxes} testid="lookup-week" accent />
+            <MiniStat label="This Month" value={summary.month_boxes} testid="lookup-month" />
+            <MiniStat label="All Time" value={summary.all_time_boxes} testid="lookup-all" />
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <div className="font-heading text-xs tracking-widest text-zinc-700">SCAN HISTORY · LAST {summary.recent_scans.length}</div>
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500">click ✕ to correct</div>
+            </div>
+            <div className="border border-zinc-200 max-h-[220px] overflow-y-auto">
+              <table className="w-full text-sm zebra" data-testid="lookup-history-table">
+                <thead className="bg-zinc-950 text-white sticky top-0">
+                  <tr>
+                    <th className="text-left px-3 py-1.5 font-heading text-[10px]">Time</th>
+                    <th className="text-left px-3 py-1.5 font-heading text-[10px]">Date</th>
+                    <th className="text-left px-3 py-1.5 font-heading text-[10px]">Supervisor</th>
+                    <th className="text-right px-3 py-1.5 font-heading text-[10px]">+</th>
+                    <th className="px-3 py-1.5"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.recent_scans.length === 0 && (
+                    <tr><td colSpan={5} className="px-3 py-6 text-center text-zinc-500 text-xs">No scans yet.</td></tr>
+                  )}
+                  {summary.recent_scans.map((s) => (
+                    <tr key={s.id} className="border-t border-zinc-100" data-testid={`lookup-scan-${s.id}`}>
+                      <td className="px-3 py-1.5 font-mono-data text-[11px] whitespace-nowrap">{new Date(s.created_at).toLocaleTimeString()}</td>
+                      <td className="px-3 py-1.5 font-mono-data text-[11px]">{s.date}</td>
+                      <td className="px-3 py-1.5 text-[11px] text-zinc-700">{s.supervisor_name || "—"}</td>
+                      <td className="px-3 py-1.5 text-right font-mono-data font-bold">+1</td>
+                      <td className="px-3 py-1.5 text-right">
+                        <button onClick={() => deleteScan(s.id)} className="text-red-600 text-xs hover:underline" data-testid={`del-scan-${s.id}`}>✕</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MiniStat({ label, value, testid, accent }) {
+  return (
+    <div className={`border-2 ${accent ? "bg-yellow-500 border-yellow-500" : "border-zinc-200 bg-white"} p-2`} data-testid={testid}>
+      <div className={`font-heading text-[9px] tracking-widest ${accent ? "text-zinc-900" : "text-zinc-500"}`}>{label}</div>
+      <div className="font-heading text-2xl font-bold leading-none mt-0.5">{fmtInt(value)}</div>
+    </div>
   );
 }
