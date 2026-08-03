@@ -136,6 +136,8 @@ export default function SupervisorScan() {
       const detail = e.response?.data?.detail;
       if (status === 404) {
         toast.error("Unknown QR code — is this a Boxwise worker tag?");
+      } else if (status === 409 && typeof detail === "string" && detail.toLowerCase().includes("your own qr")) {
+        toast.error("Self-scan blocked", { description: detail, duration: 4600 });
       } else if (status === 429) {
         toast.warning("Slow down — same worker scanned less than 2s ago");
       } else if (status === 403 && detail && typeof detail === "object" && detail.message) {

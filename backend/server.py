@@ -599,10 +599,35 @@ def _extract_worker_id(payload: str) -> str:
         v = v[5:]
     return v
 
+SELF_SCAN_MSG = (
+    "You cannot scan your own QR code. "
+    "Please ask another Supervisor to record your completed boxes or attendance."
+)
+
+async def _reject_self_scan(supervisor: dict, kind: str):
+    """Log a rejected self-scan attempt and raise 409."""
+    now = datetime.now(timezone.utc)
+    await db.scan_rejections.insert_one({
+        "id": str(uuid.uuid4()),
+        "worker_id": supervisor["id"],
+        "worker_name": supervisor["name"],
+        "barcode": f"BW-W:{supervisor['id']}",
+        "date": date.today().isoformat(),
+        "created_at": now.isoformat(),
+        "reason": "supervisor-self-scan",
+        "kind": kind,
+        "supervisor_id": supervisor["id"],
+        "supervisor_name": supervisor["name"],
+        "supervisor_email": supervisor["email"],
+    })
+    raise HTTPException(status_code=409, detail=SELF_SCAN_MSG)
+
 @api.post("/attendance/scan-clock-in")
 async def scan_clock_in(body: ScanClockIn, user: dict = Depends(require_admin)):
     """Supervisor scans a worker's QR to clock them IN. Requires supervisor's GPS to be inside a worksite radius."""
     wid = _extract_worker_id(body.worker_id)
+    if wid == user["id"]:
+        await _reject_self_scan(user, "clock_in")
     worker = await db.users.find_one({"id": wid, "role": "worker"}, {"_id": 0, "password_hash": 0})
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found for this QR code")
@@ -666,6 +691,8 @@ async def scan_clock_in(body: ScanClockIn, user: dict = Depends(require_admin)):
 async def scan_clock_out(body: ScanClockIn, user: dict = Depends(require_admin)):
     """Supervisor scans a worker's QR to clock them OUT."""
     wid = _extract_worker_id(body.worker_id)
+    if wid == user["id"]:
+        await _reject_self_scan(user, "clock_out")
     worker = await db.users.find_one({"id": wid, "role": "worker"}, {"_id": 0, "password_hash": 0})
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found for this QR code")
@@ -957,6 +984,8 @@ async def create_worker_scan(body: dict, user: dict = Depends(require_admin)):
         raise HTTPException(status_code=400, detail="worker_id (or QR barcode) is required")
     if worker_qr.startswith("BW-W:"):
         worker_qr = worker_qr[5:]
+    if worker_qr == user["id"]:
+        await _reject_self_scan(user, "box_scan")
     worker = await db.users.find_one({"id": worker_qr, "role": "worker"}, {"_id": 0, "password_hash": 0})
     if not worker:
         raise HTTPException(status_code=404, detail="Worker not found for this QR code")
