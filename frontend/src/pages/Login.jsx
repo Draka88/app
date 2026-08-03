@@ -140,14 +140,20 @@ export default function Login() {
             {loading ? "Signing in…" : "Enter shift →"}
           </button>
 
-          <div className="text-sm text-zinc-600">
-            New worker?{" "}
+          <div className="text-sm text-zinc-600 flex justify-between">
             <a
               href="/register"
               className="font-bold underline text-zinc-950"
               data-testid="link-to-register"
             >
-              Create an account
+              New worker? Create an account
+            </a>
+            <a
+              href="/forgot-password"
+              className="font-bold underline text-zinc-700 hover:text-zinc-950"
+              data-testid="link-to-forgot"
+            >
+              Forgot password?
             </a>
           </div>
 

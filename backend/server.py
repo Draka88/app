@@ -8,7 +8,9 @@ import io
 import math
 import logging
 import uuid
+import secrets
 import bcrypt
+import httpx
 import jwt
 from datetime import datetime, timezone, timedelta, date, timedelta as td
 from typing import List, Optional, Annotated
@@ -28,6 +30,25 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
+
+# ---------- Email (Emergent-managed Resend proxy) ----------
+EMAIL_BASE_URL = "https://integrations.emergentagent.com"
+EMAIL_KEY = os.environ.get("EMERGENT_EMAIL_KEY")
+EMAIL_FROM_NAME = os.environ.get("EMAIL_FROM_NAME", "Boxwise")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+RESET_TOKEN_TTL_MIN = 30
+
+async def _send_email(to_email: str, subject: str, html: str):
+    if not EMAIL_KEY:
+        raise RuntimeError("EMERGENT_EMAIL_KEY missing — cannot send email")
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(
+            f"{EMAIL_BASE_URL}/api/v1/email/send",
+            headers={"X-Email-Key": EMAIL_KEY},
+            json={"to": [to_email], "subject": subject, "html": html, "from_name": EMAIL_FROM_NAME},
+        )
+        r.raise_for_status()
+        return r.json()
 
 # ---------- App ----------
 app = FastAPI(title="Boxwise Payroll API")
@@ -106,6 +127,13 @@ class WorkerClockIn(BaseModel):
     longitude: float
     accuracy_m: Optional[float] = None
     worksite_id: Optional[str] = None
+
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+class ResetPasswordIn(BaseModel):
+    token: str = Field(min_length=16, max_length=128)
+    new_password: str = Field(min_length=6, max_length=200)
 
 class BoxReportIn(BaseModel):
     boxes: int = Field(ge=0)
@@ -254,6 +282,85 @@ async def login(body: LoginIn, response: Response):
 async def logout(response: Response):
     response.delete_cookie("access_token", path="/")
     return {"ok": True}
+
+# ---------- Password reset (workers only) ----------
+def _build_reset_email_html(name: str, link: str, minutes: int) -> str:
+    return f"""
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#fafaf9;padding:24px 0;font-family:Helvetica,Arial,sans-serif;">
+      <tr><td align="center">
+        <table role="presentation" width="560" cellspacing="0" cellpadding="0" style="background:#ffffff;border:1px solid #e4e4e7;">
+          <tr><td style="background:#09090b;padding:20px 24px;">
+            <div style="display:inline-block;background:#eab308;color:#09090b;font-weight:700;letter-spacing:2px;font-size:11px;padding:3px 8px;">BOXWISE · WORKER</div>
+            <div style="color:#ffffff;font-size:22px;font-weight:800;margin-top:8px;">Reset your password</div>
+          </td></tr>
+          <tr><td style="padding:24px;color:#3f3f46;font-size:14px;line-height:22px;">
+            <p style="margin:0 0 12px 0;">Hi {name or "there"},</p>
+            <p style="margin:0 0 12px 0;">We received a request to reset your Boxwise worker account password. Click the button below to choose a new one. This link expires in <b>{minutes} minutes</b>.</p>
+            <p style="margin:20px 0;text-align:center;">
+              <a href="{link}" style="display:inline-block;background:#eab308;color:#09090b;text-decoration:none;padding:12px 20px;font-weight:800;letter-spacing:1px;">RESET PASSWORD →</a>
+            </p>
+            <p style="margin:0 0 8px 0;font-size:12px;color:#71717a;">If the button doesn't work, copy this URL into your browser:</p>
+            <p style="margin:0 0 16px 0;font-family:monospace;font-size:11px;color:#3f3f46;word-break:break-all;">{link}</p>
+            <p style="margin:16px 0 0 0;font-size:12px;color:#71717a;">If you didn't request this, ignore this email — your password stays the same.</p>
+          </td></tr>
+        </table>
+        <div style="color:#a1a1aa;font-size:11px;margin-top:12px;letter-spacing:1px;">BOXWISE · CURRENCY A$</div>
+      </td></tr>
+    </table>
+    """
+
+@api.post("/auth/forgot-password")
+async def forgot_password(body: ForgotPasswordIn):
+    """Always returns 200 so email existence is not leaked. Workers only — admin emails are silently ignored."""
+    email = body.email.strip().lower()
+    generic_ok = {"ok": True, "message": "If a worker account exists for that email, a reset link has been sent."}
+    user = await db.users.find_one({"email": email})
+    if not user or user.get("role") != "worker":
+        return generic_ok
+
+    now = datetime.now(timezone.utc)
+    # Invalidate any previous unused tokens for this user
+    await db.password_reset_tokens.update_many(
+        {"user_id": user["id"], "used_at": None},
+        {"$set": {"used_at": now.isoformat(), "invalidated": True}},
+    )
+    token = secrets.token_urlsafe(32)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "email": email,
+        "token": token,
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=RESET_TOKEN_TTL_MIN)).isoformat(),
+        "used_at": None,
+    }
+    await db.password_reset_tokens.insert_one(doc)
+    reset_link = f"{FRONTEND_URL.rstrip('/')}/reset-password?token={token}"
+    try:
+        await _send_email(
+            to_email=email,
+            subject="Reset your Boxwise password",
+            html=_build_reset_email_html(user.get("name") or "", reset_link, RESET_TOKEN_TTL_MIN),
+        )
+    except Exception as e:
+        logger.exception("Password reset email failed for %s: %s", email, e)
+        raise HTTPException(status_code=502, detail="Could not send reset email. Please try again later.")
+    return generic_ok
+
+@api.post("/auth/reset-password")
+async def reset_password(body: ResetPasswordIn):
+    now = datetime.now(timezone.utc)
+    rec = await db.password_reset_tokens.find_one({"token": body.token, "used_at": None})
+    if not rec:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has already been used.")
+    if datetime.fromisoformat(rec["expires_at"]) < now:
+        raise HTTPException(status_code=400, detail="This reset link has expired. Please request a new one.")
+    user = await db.users.find_one({"id": rec["user_id"], "role": "worker"})
+    if not user:
+        raise HTTPException(status_code=400, detail="Account is no longer eligible for reset.")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": hash_password(body.new_password)}})
+    await db.password_reset_tokens.update_one({"id": rec["id"]}, {"$set": {"used_at": now.isoformat()}})
+    return {"ok": True, "message": "Password updated. You can now sign in with your new password."}
 
 @api.post("/auth/register")
 async def register(body: RegisterIn, response: Response):
@@ -2230,6 +2337,8 @@ async def startup():
     await db.attendance.create_index([("worker_id", 1), ("date", 1)], unique=True)
     await db.worksites.create_index("id", unique=True)
     await db.users.create_index("employee_id", unique=True, sparse=True)
+    await db.password_reset_tokens.create_index("token", unique=True)
+    await db.password_reset_tokens.create_index([("user_id", 1), ("created_at", -1)])
 
     # Backfill employee_id for workers who don't have one
     async for w in db.users.find({"role": "worker", "employee_id": {"$exists": False}}):
