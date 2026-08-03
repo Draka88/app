@@ -14,6 +14,7 @@ import AdminGenerator from "./pages/AdminGenerator";
 import AdminPayConfig from "./pages/AdminPayConfig";
 import AdminWorksites from "./pages/AdminWorksites";
 import AdminAttendance from "./pages/AdminAttendance";
+import WorkerDashboard from "./pages/WorkerDashboard";
 
 function Loading() {
   return (
@@ -54,10 +55,11 @@ function AppRoutes() {
       </Routes>
     );
   }
-  // Workers no longer log in — block any stale sessions
+  // Worker: personal dashboard only (own attendance + payroll)
   return (
     <Routes>
-      <Route path="*" element={<Navigate to="/login" replace />} />
+      <Route path="/" element={<WorkerDashboard />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

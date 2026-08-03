@@ -53,6 +53,7 @@ Automatically calculate the total number of boxes processed by each worker every
 - **P2** — Live map preview for worksites
 
 ## Recently Completed (Feb 2026)
+- **Worker Login Restored** (P0 → DONE): workers can log in with their own email + employee_id (auto-generated `EMP-####`, unique). Personal dashboard shows GPS-verified Clock In/Out, own attendance history (last 30 days), own weekly payroll, and PDF/Excel payslip downloads. Workers CANNOT reach admin endpoints (`/api/workers` returns 403). Existing supervisor-scans-worker path still functions.
 - **Supervisor Self-Scan Block** (P0 → DONE): every scan path (`/scans/for-worker`, `/attendance/scan-clock-in`, `/attendance/scan-clock-out`) now rejects with 409 and message "You cannot scan your own QR code…" when the QR id equals the authenticated supervisor's id. Every attempt is written to `db.scan_rejections` with `reason: "supervisor-self-scan"` + `kind`. Frontend Scan Station shows a titled toast for this case.
 - **Restrict Workers to Sites** (P2 → DONE): admin can assign one or more worksites per worker via `PATCH /api/workers/{id}` (`assigned_worksite_ids`). Geofenced clock-in/out is refused with the message "{name} is not permitted to clock in/out at {site}." Empty list = worker allowed at any active site. UI: checkboxes in the Workers roster edit mode.
 

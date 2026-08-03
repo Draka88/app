@@ -1,115 +1,108 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { api, API, formatApiError } from "../lib/api";
-import { fmtAUD, fmtInt, todayISO, isoWeekKey } from "../lib/format";
+import { fmtAUD, fmtInt, isoWeekKey } from "../lib/format";
 import Layout from "../components/Layout";
-import BarcodeScanner from "../components/BarcodeScanner";
-import ClockInOut from "../components/ClockInOut";
 import { useAuth } from "../contexts/AuthContext";
 import { toast } from "sonner";
 
+function fmtTime(iso) {
+  return iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+}
+function fmtDuration(startISO) {
+  if (!startISO) return "—";
+  const s = Math.max(0, Math.floor((Date.now() - new Date(startISO).getTime()) / 1000));
+  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
 export default function WorkerDashboard() {
   const { user } = useAuth();
-  const [rate, setRate] = useState(0);
-  const [weeks, setWeeks] = useState([]);
   const [week, setWeek] = useState(isoWeekKey());
+  const [weeks, setWeeks] = useState([]);
   const [summary, setSummary] = useState(null);
-  const [reports, setReports] = useState([]);
-  const [scans, setScans] = useState([]);
-  const [scannerOn, setScannerOn] = useState(false);
-  const [manualOpen, setManualOpen] = useState(false);
-  const [boxes, setBoxes] = useState("");
-  const [date, setDate] = useState(todayISO());
-  const [note, setNote] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [dayCount, setDayCount] = useState(0);
-  const scanBusyRef = useRef(false);
+  const [history, setHistory] = useState([]);
+  const [entry, setEntry] = useState(null);
+  const [worksites, setWorksites] = useState([]);
+  const [worksiteId, setWorksiteId] = useState("");
+  const [gps, setGps] = useState(null);
+  const [gpsError, setGpsError] = useState(null);
+  const [locating, setLocating] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [, setTick] = useState(0);
+  const timerRef = useRef(null);
 
-  const loadCore = useCallback(async () => {
+  const load = useCallback(async () => {
     try {
-      const [r, w, s, rep, sc, day] = await Promise.all([
-        api.get("/settings/rate"),
+      const today = new Date().toISOString().slice(0, 10);
+      const [wks, s, h, tod, sites] = await Promise.all([
         api.get("/weeks"),
         api.get(`/summary/me?week=${week}`),
-        api.get(`/reports/me?week=${week}`),
-        api.get("/scans/me?limit=50"),
-        api.get("/summary/period?period=day"),
+        api.get(`/attendance/me?limit=30`),
+        api.get(`/attendance/me?date_=${today}`),
+        api.get(`/worksites?only_active=true`),
       ]);
-      setRate(r.data.rate);
-      setWeeks(w.data.weeks);
+      setWeeks(wks.data.weeks);
       setSummary(s.data);
-      setReports(rep.data);
-      setScans(sc.data);
-      setDayCount(day.data.total_boxes || 0);
-    } catch (e) {
-      toast.error(formatApiError(e.response?.data?.detail));
-    }
+      setHistory(Array.isArray(h.data) ? h.data : []);
+      setEntry(tod.data || null);
+      setWorksites(sites.data || []);
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
   }, [week]);
 
-  useEffect(() => {
-    loadCore();
-  }, [loadCore]);
+  useEffect(() => { load(); }, [load]);
 
-  const handleScan = async (barcode, format) => {
-    if (scanBusyRef.current) return;
-    scanBusyRef.current = true;
+  useEffect(() => {
+    if (entry && entry.clock_in && !entry.clock_out) {
+      timerRef.current = setInterval(() => setTick((t) => t + 1), 1000);
+      return () => clearInterval(timerRef.current);
+    }
+  }, [entry]);
+
+  const requestGps = useCallback(() => new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error("Geolocation not supported"));
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const g = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
+        setGps(g); setGpsError(null); setLocating(false); resolve(g);
+      },
+      (err) => {
+        setLocating(false);
+        const msg = err.code === 1
+          ? "GPS permission denied. Clock In/Out is not allowed without location access."
+          : (err.message || "Unable to get GPS location");
+        setGpsError(msg);
+        reject(new Error(msg));
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
+    );
+  }), []);
+
+  useEffect(() => { requestGps().catch(() => {}); }, [requestGps]);
+
+  const doClock = async (kind) => {
+    setBusy(true);
     try {
-      const { data } = await api.post("/scans", { barcode, format });
-      if (data.suspicious) {
-        toast.warning(`⚠ Not on today's whitelist: ${barcode}`, { description: `Scan counted, flagged for review.` });
-      } else {
-        toast.success(`+1 box · ${barcode}`, { description: `Total today: ${dayCount + 1}` });
-      }
-      setScans((prev) => [data, ...prev].slice(0, 50));
-      setDayCount((n) => n + 1);
-      const s = await api.get(`/summary/me?week=${week}`);
-      setSummary(s.data);
+      let g = gps;
+      try { g = await requestGps(); } catch (e) { toast.error(e.message); return; }
+      const payload = { latitude: g.lat, longitude: g.lng, accuracy_m: g.accuracy };
+      if (worksiteId) payload.worksite_id = worksiteId;
+      const path = kind === "in" ? "/attendance/clock-in" : "/attendance/clock-out";
+      const { data } = await api.post(path, payload);
+      toast.success(
+        kind === "in"
+          ? `Clocked IN at ${fmtTime(data.clock_in)}`
+          : `Clocked OUT · ${data.hours}h worked`,
+        { description: kind === "in" ? "Have a great shift!" : "Hours auto-saved to your payroll" }
+      );
+      load();
     } catch (e) {
-      const status = e.response?.status;
       const detail = e.response?.data?.detail;
-      if (status === 409 && detail && typeof detail === "object") {
-        const originalTime = detail.original_time ? new Date(detail.original_time).toLocaleTimeString() : "";
-        toast.error("This barcode has already been scanned today.", {
-          description: `${barcode} · already scanned by ${detail.original_worker || "another worker"}${originalTime ? " at " + originalTime : ""}. Box count NOT increased.`,
-          duration: 5000,
-        });
-      } else if (status === 409) {
-        toast.error("This barcode has already been scanned today.", {
-          description: "Box count NOT increased.",
-          duration: 5000,
-        });
+      if (detail && typeof detail === "object" && detail.message) {
+        toast.error(detail.message, { description: detail.reason, duration: 4200 });
       } else {
         toast.error(formatApiError(detail));
       }
-    } finally {
-      setTimeout(() => { scanBusyRef.current = false; }, 400);
-    }
-  };
-
-  const submitManual = async (e) => {
-    e.preventDefault();
-    const n = parseInt(boxes, 10);
-    if (isNaN(n) || n <= 0) { toast.error("Enter a valid box count"); return; }
-    setSubmitting(true);
-    try {
-      await api.post("/reports", { boxes: n, date, note: note || null });
-      toast.success(`Reported ${n} boxes`);
-      setBoxes(""); setNote("");
-      await loadCore();
-    } catch (e) {
-      toast.error(formatApiError(e.response?.data?.detail));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const removeReport = async (id) => {
-    try {
-      await api.delete(`/reports/${id}`);
-      toast.success("Removed");
-      loadCore();
-    } catch (e) {
-      toast.error(formatApiError(e.response?.data?.detail));
-    }
+    } finally { setBusy(false); }
   };
 
   const download = (path, filename) => {
@@ -128,16 +121,19 @@ export default function WorkerDashboard() {
       .catch(() => toast.error("Download failed"));
   };
 
+  const active = entry && entry.clock_in && !entry.clock_out;
+  const done = entry && entry.clock_out;
+
   return (
     <Layout>
       <div className="flex items-end justify-between mb-6 gap-4 flex-wrap">
         <div>
           <div className="inline-block bg-yellow-500 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-zinc-950 mb-2">
-            {user?.name} · Worker
+            {user?.employee_id ? `${user.employee_id} · ` : ""}{user?.name} · Worker
           </div>
           <h1 className="font-heading text-4xl sm:text-5xl leading-none">My Shift</h1>
           <p className="text-zinc-500 mt-2 text-sm">
-            Scan every box barcode as you pack. Each scan adds one box to your payslip.
+            Clock in when you arrive on-site. Your GPS confirms you are at the workplace.
           </p>
         </div>
         <div>
@@ -149,199 +145,180 @@ export default function WorkerDashboard() {
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-        <Kpi label="Today" value={fmtInt(dayCount)} testid="kpi-today" />
-        <Kpi label="This Week" value={fmtInt(summary?.total_boxes || 0)} testid="kpi-boxes" />
-        <Kpi label="Rate / Box" value={fmtAUD(rate)} testid="kpi-rate" mono />
+        <Kpi label="Today" value={active ? fmtDuration(entry.clock_in) : (done ? `${entry.hours}h` : "—")} testid="kpi-today" mono={active} />
+        <Kpi label="Week Hours" value={fmtInt(summary?.total_hours || 0)} testid="kpi-hours" />
+        <Kpi label="Sessions" value={fmtInt(history.length)} testid="kpi-sessions" />
         <Kpi label="Week Pay" value={fmtAUD(summary?.earnings || 0)} testid="kpi-earnings" accent />
       </div>
 
-      <ClockInOut />
-
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-        {/* Scanner column */}
-        <div className="lg:col-span-2 space-y-4">
-          <div className="card-sharp p-5">
-            <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
-              <div>
-                <h2 className="font-heading text-xl">Barcode Scanner</h2>
-                <p className="text-xs text-zinc-500">Point camera at box barcode or QR</p>
-              </div>
-              {!scannerOn ? (
-                <button
-                  onClick={() => setScannerOn(true)}
-                  className="btn-yellow px-4 py-2.5 text-xs"
-                  data-testid="start-scanner-button"
-                >
-                  ▶ Start scanning
-                </button>
-              ) : (
-                <button
-                  onClick={() => setScannerOn(false)}
-                  className="btn-outline-ink px-4 py-2.5 text-xs"
-                  data-testid="stop-scanner-button"
-                >
-                  ■ Stop
-                </button>
-              )}
+      {/* Attendance controls */}
+      <div className="card-sharp p-5 mb-6" data-testid="attendance-controls">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div>
+            <label className="block font-heading text-xs mb-1 text-zinc-700">Worksite</label>
+            <select value={worksiteId} onChange={(e) => setWorksiteId(e.target.value)} className="input-sharp w-full" data-testid="worksite-select">
+              <option value="">Auto-detect nearest</option>
+              {worksites.map((w) => (
+                <option key={w.id} value={w.id}>{w.name} · {w.radius_m}m</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block font-heading text-xs mb-1 text-zinc-700">Your GPS</label>
+            <div className="input-sharp w-full font-mono-data text-xs">
+              {gps ? `${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)} ±${Math.round(gps.accuracy)}m` : (locating ? "Locating…" : "—")}
             </div>
-            {scannerOn ? (
-              <BarcodeScanner onDetected={handleScan} />
-            ) : (
-              <div className="border-2 border-dashed border-zinc-300 p-8 text-center text-zinc-500 text-sm" data-testid="scanner-idle">
-                <div className="font-heading text-2xl text-zinc-950 mb-1">READY</div>
-                Tap “Start scanning” to open the camera. Every successful scan adds 1 box.
-              </div>
+          </div>
+          <div>
+            <button onClick={() => requestGps().catch((e) => toast.error(e.message))} className="btn-outline-ink px-4 py-2 text-xs w-full" disabled={locating} data-testid="refresh-gps-btn">
+              {locating ? "Locating…" : "◎ Refresh GPS"}
+            </button>
+          </div>
+        </div>
+        {gpsError && (
+          <div className="mt-3 border-2 border-red-500 bg-red-50 p-3 text-xs text-red-800" data-testid="gps-error">
+            <b>Location required:</b> {gpsError}
+          </div>
+        )}
+      </div>
+
+      {/* Clock card */}
+      <div className={`card-sharp p-5 mb-6 ${active ? "bg-yellow-500 border-yellow-500" : ""}`} data-testid="clock-card">
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className={`inline-block w-2.5 h-2.5 rounded-full ${active ? "bg-zinc-950 animate-pulse" : done ? "bg-zinc-400" : "bg-green-600"}`}></span>
+              <span className="font-heading text-xs tracking-widest">TIME ATTENDANCE · {active ? "ACTIVE" : done ? "COMPLETED" : "READY"}</span>
+            </div>
+            {active && (
+              <>
+                <div className="mt-2 font-heading text-4xl leading-none font-mono-data" data-testid="live-duration">
+                  {fmtDuration(entry.clock_in)}
+                </div>
+                <div className="mt-1 text-xs text-zinc-800">
+                  In at <b>{fmtTime(entry.clock_in)}</b> · {entry.worksite_name || "—"} · live shift
+                </div>
+              </>
+            )}
+            {done && (
+              <>
+                <div className="mt-2 font-heading text-3xl leading-none">
+                  {entry.hours} h <span className="text-zinc-500 text-lg">worked today</span>
+                </div>
+                <div className="mt-1 text-xs text-zinc-600">
+                  In <b>{fmtTime(entry.clock_in)}</b> → Out <b>{fmtTime(entry.clock_out)}</b> · {entry.worksite_name || "—"}
+                </div>
+              </>
+            )}
+            {!active && !done && (
+              <>
+                <div className="mt-2 font-heading text-3xl leading-none">Not clocked in</div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  Ready when you are. GPS must be inside a registered worksite.
+                </div>
+              </>
             )}
           </div>
-
-          <div className="card-sharp p-5">
-            <button
-              onClick={() => setManualOpen((o) => !o)}
-              className="w-full text-left flex items-center justify-between"
-              data-testid="toggle-manual"
-            >
-              <div>
-                <div className="font-heading text-sm">Manual entry</div>
-                <div className="text-xs text-zinc-500">If a barcode is damaged or missing</div>
-              </div>
-              <span className="font-heading text-lg">{manualOpen ? "–" : "+"}</span>
-            </button>
-            {manualOpen && (
-              <form onSubmit={submitManual} className="mt-4 space-y-3" data-testid="report-form">
-                <div>
-                  <label className="block font-heading text-xs mb-1 text-zinc-700">Boxes</label>
-                  <input type="number" min="1" required value={boxes} onChange={(e) => setBoxes(e.target.value)} className="input-sharp font-mono-data text-lg" data-testid="report-boxes-input" placeholder="e.g. 5" />
-                </div>
-                <div>
-                  <label className="block font-heading text-xs mb-1 text-zinc-700">Date</label>
-                  <input type="date" required value={date} onChange={(e) => setDate(e.target.value)} className="input-sharp font-mono-data" data-testid="report-date-input" />
-                </div>
-                <div>
-                  <label className="block font-heading text-xs mb-1 text-zinc-700">Note</label>
-                  <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Torn barcode on pallet 3" className="input-sharp" data-testid="report-note-input" />
-                </div>
-                <button type="submit" disabled={submitting} className="btn-yellow w-full py-2.5 text-xs" data-testid="report-submit-button">
-                  {submitting ? "Saving…" : "Log manual boxes →"}
-                </button>
-              </form>
+          <div>
+            {!active && !done && (
+              <button onClick={() => doClock("in")} disabled={busy || !gps} className="btn-yellow px-6 py-4 text-sm" data-testid="clock-in-btn">
+                {busy ? "…" : "▶ Clock in"}
+              </button>
+            )}
+            {active && (
+              <button onClick={() => doClock("out")} disabled={busy || !gps} className="btn-outline-ink px-6 py-4 text-sm border-zinc-950" data-testid="clock-out-btn">
+                {busy ? "…" : "■ Clock out"}
+              </button>
+            )}
+            {done && (
+              <div className="font-mono-data text-xs text-zinc-600 text-right" data-testid="clock-done">Shift closed</div>
             )}
           </div>
         </div>
+      </div>
 
-        {/* Right column: scan history + weekly log */}
-        <div className="lg:col-span-3 space-y-4">
-          <div className="card-sharp p-5">
-            <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
-              <div>
-                <h2 className="font-heading text-xl">Scan history</h2>
-                <p className="text-xs text-zinc-500">Every barcode you scanned, newest first · fraud-proof timestamps</p>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => download(`/payslip/${user.id}?week=${week}`, `payslip_${week}.pdf`)}
-                  className="btn-outline-ink px-3 py-2 text-xs"
-                  data-testid="payslip-download-button"
-                >
-                  ↓ PDF
-                </button>
-                <button
-                  onClick={() => download(`/payslip/${user.id}/xlsx?week=${week}`, `payslip_${week}.xlsx`)}
-                  className="btn-outline-ink px-3 py-2 text-xs"
-                  data-testid="payslip-xlsx-button"
-                >
-                  ↓ Excel
-                </button>
-              </div>
-            </div>
-            <div className="overflow-x-auto border border-zinc-200 max-h-[360px] overflow-y-auto">
-              <table className="w-full text-sm zebra" data-testid="scans-table">
-                <thead className="bg-zinc-950 text-white sticky top-0">
-                  <tr>
-                    <th className="text-left px-3 py-2 font-heading text-xs">Time</th>
-                    <th className="text-left px-3 py-2 font-heading text-xs">Barcode</th>
-                    <th className="text-left px-3 py-2 font-heading text-xs">Date</th>
-                    <th className="text-right px-3 py-2 font-heading text-xs">Boxes</th>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Attendance history */}
+        <div className="card-sharp p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-heading text-xl">My attendance</h2>
+            <span className="text-xs text-zinc-500">Last 30 days</span>
+          </div>
+          <div className="overflow-x-auto border border-zinc-200 max-h-[420px] overflow-y-auto">
+            <table className="w-full text-sm zebra" data-testid="my-attendance-table">
+              <thead className="bg-zinc-950 text-white sticky top-0">
+                <tr>
+                  <th className="text-left px-3 py-2 font-heading text-xs">Date</th>
+                  <th className="text-left px-3 py-2 font-heading text-xs">In</th>
+                  <th className="text-left px-3 py-2 font-heading text-xs">Out</th>
+                  <th className="text-right px-3 py-2 font-heading text-xs">Hours</th>
+                  <th className="text-left px-3 py-2 font-heading text-xs">Site</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.length === 0 && (
+                  <tr><td colSpan={5} className="px-3 py-8 text-center text-zinc-500 text-xs">No shifts yet.</td></tr>
+                )}
+                {history.map((h) => (
+                  <tr key={h.id} className="border-t border-zinc-100" data-testid={`my-attn-${h.id}`}>
+                    <td className="px-3 py-2 font-mono-data text-xs">{h.date}</td>
+                    <td className="px-3 py-2 font-mono-data text-xs">{fmtTime(h.clock_in)}</td>
+                    <td className="px-3 py-2 font-mono-data text-xs">{h.clock_out ? fmtTime(h.clock_out) : <span className="text-yellow-700 font-bold">ACTIVE</span>}</td>
+                    <td className="px-3 py-2 text-right font-mono-data font-bold">{h.hours ?? "—"}</td>
+                    <td className="px-3 py-2 text-xs">{h.worksite_name || "—"}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {scans.length === 0 && (
-                    <tr><td colSpan={4} className="px-3 py-8 text-center text-zinc-500 text-xs">No scans yet. Start the scanner to log your first box.</td></tr>
-                  )}
-                  {scans.map((s) => (
-                    <tr key={s.id} className={`border-t border-zinc-100 ${s.suspicious ? "bg-red-50" : ""}`} data-testid={`scan-row-${s.id}`}>
-                      <td className="px-3 py-2 font-mono-data text-xs whitespace-nowrap">
-                        {new Date(s.created_at).toLocaleTimeString()}
-                      </td>
-                      <td className="px-3 py-2 font-mono-data text-xs break-all">
-                        {s.barcode}
-                        {s.suspicious && (
-                          <span className="ml-2 text-[9px] uppercase tracking-widest bg-red-600 text-white px-1.5 py-0.5 font-bold" title={s.suspicious_reason || "flagged"}>
-                            !
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 font-mono-data text-xs">{s.date}</td>
-                      <td className="px-3 py-2 text-right font-mono-data font-bold">+{s.boxes}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Payroll breakdown */}
+        <div className="card-sharp p-5">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+            <div>
+              <h2 className="font-heading text-xl">Weekly payroll · {week}</h2>
+              <p className="text-xs text-zinc-500">{summary?.week_start} → {summary?.week_end}</p>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => download(`/payslip/${user.id}?week=${week}`, `payslip_${week}.pdf`)} className="btn-outline-ink px-3 py-2 text-xs" data-testid="payslip-pdf-btn">↓ PDF</button>
+              <button onClick={() => download(`/payslip/${user.id}/xlsx?week=${week}`, `payslip_${week}.xlsx`)} className="btn-outline-ink px-3 py-2 text-xs" data-testid="payslip-xlsx-btn">↓ Excel</button>
             </div>
           </div>
-
-          <div className="card-sharp p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-heading text-xl">Weekly log · {week}</h2>
-                <p className="text-xs text-zinc-500">{summary?.week_start} → {summary?.week_end}</p>
-              </div>
-            </div>
-            <div className="overflow-x-auto border border-zinc-200">
-              <table className="w-full text-sm zebra" data-testid="reports-table">
-                <thead className="bg-zinc-950 text-white">
-                  <tr>
-                    <th className="text-left px-3 py-2 font-heading text-xs">Date</th>
-                    <th className="text-left px-3 py-2 font-heading text-xs">Source</th>
-                    <th className="text-right px-3 py-2 font-heading text-xs">Boxes</th>
-                    <th className="text-right px-3 py-2 font-heading text-xs">Amount</th>
-                    <th className="px-2 py-2"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {reports.length === 0 && (
-                    <tr><td colSpan={5} className="px-3 py-6 text-center text-zinc-500 text-xs">No entries yet this week.</td></tr>
-                  )}
-                  {reports.map((r) => (
-                    <tr key={r.id} className="border-t border-zinc-100" data-testid={`report-row-${r.id}`}>
-                      <td className="px-3 py-2 font-mono-data">{r.date}</td>
-                      <td className="px-3 py-2">
-                        <span className={`text-[10px] uppercase tracking-widest px-1.5 py-0.5 font-bold ${r.source === "scan" ? "bg-yellow-500 text-zinc-950" : "border border-zinc-400 text-zinc-700"}`}>
-                          {r.source || "manual"}
-                        </span>
-                        {r.barcode && <span className="ml-2 font-mono-data text-[10px] text-zinc-500 break-all">{r.barcode}</span>}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono-data font-semibold">{fmtInt(r.boxes)}</td>
-                      <td className="px-3 py-2 text-right font-mono-data">{fmtAUD(r.boxes * rate)}</td>
-                      <td className="px-2 py-2 text-right">
-                        <button onClick={() => removeReport(r.id)} className="text-xs text-red-600 hover:underline" data-testid={`delete-report-${r.id}`}>
-                          Remove
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-                {reports.length > 0 && (
-                  <tfoot>
-                    <tr className="bg-zinc-100 border-t-2 border-zinc-900">
-                      <td className="px-3 py-2 font-heading" colSpan={2}>Total</td>
-                      <td className="px-3 py-2 text-right font-mono-data font-bold">{fmtInt(summary?.total_boxes || 0)}</td>
-                      <td className="px-3 py-2 text-right font-mono-data font-bold">{fmtAUD(summary?.earnings || 0)}</td>
-                      <td></td>
-                    </tr>
-                  </tfoot>
+          <div className="overflow-x-auto border border-zinc-200">
+            <table className="w-full text-sm zebra" data-testid="my-payroll-table">
+              <thead className="bg-zinc-950 text-white">
+                <tr>
+                  <th className="text-left px-3 py-2 font-heading text-xs">Date</th>
+                  <th className="text-right px-3 py-2 font-heading text-xs">Hours</th>
+                  <th className="text-right px-3 py-2 font-heading text-xs">Rate</th>
+                  <th className="text-right px-3 py-2 font-heading text-xs">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(!summary?.days || summary.days.length === 0) && (
+                  <tr><td colSpan={4} className="px-3 py-8 text-center text-zinc-500 text-xs">No payroll entries this week.</td></tr>
                 )}
-              </table>
-            </div>
+                {(summary?.days || []).map((d) => (
+                  <tr key={d.date} className="border-t border-zinc-100">
+                    <td className="px-3 py-2 font-mono-data text-xs">{d.date}</td>
+                    <td className="px-3 py-2 text-right font-mono-data">{d.hours || 0}</td>
+                    <td className="px-3 py-2 text-right font-mono-data">{fmtAUD(d.hourly_rate || 0)}</td>
+                    <td className="px-3 py-2 text-right font-mono-data font-bold">{fmtAUD(d.earnings || 0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              {summary?.days?.length > 0 && (
+                <tfoot>
+                  <tr className="bg-zinc-100 border-t-2 border-zinc-900">
+                    <td className="px-3 py-2 font-heading">Total</td>
+                    <td className="px-3 py-2 text-right font-mono-data font-bold">{summary.total_hours}</td>
+                    <td></td>
+                    <td className="px-3 py-2 text-right font-mono-data font-bold">{fmtAUD(summary.earnings)}</td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
           </div>
         </div>
       </div>
@@ -353,7 +330,7 @@ function Kpi({ label, value, testid, accent, mono }) {
   return (
     <div className={`card-sharp p-4 ${accent ? "bg-yellow-500 border-yellow-500" : ""}`} data-testid={testid}>
       <div className={`font-heading text-[10px] tracking-widest ${accent ? "text-zinc-900" : "text-zinc-500"}`}>{label}</div>
-      <div className={`mt-2 font-heading text-3xl sm:text-4xl leading-none ${mono ? "font-mono-data" : ""}`}>{value}</div>
+      <div className={`mt-2 font-heading text-2xl sm:text-3xl leading-none ${mono ? "font-mono-data" : ""}`}>{value}</div>
     </div>
   );
 }

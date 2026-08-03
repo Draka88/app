@@ -74,6 +74,7 @@ class UserOut(BaseModel):
     email: str
     name: str
     role: str
+    employee_id: Optional[str] = None
 
 class LoginIn(BaseModel):
     email: str
@@ -84,18 +85,27 @@ class RegisterIn(BaseModel):
     name: str
     password: str
     job_role: Optional[str] = None
+    employee_id: Optional[str] = None
 
 class WorkerCreate(BaseModel):
     email: str
     name: str
     password: str
     job_role: Optional[str] = None
+    employee_id: Optional[str] = None
 
 class WorkerUpdate(BaseModel):
     name: Optional[str] = None
     password: Optional[str] = None
     job_role: Optional[str] = None
+    employee_id: Optional[str] = None
     assigned_worksite_ids: Optional[List[str]] = None
+
+class WorkerClockIn(BaseModel):
+    latitude: float
+    longitude: float
+    accuracy_m: Optional[float] = None
+    worksite_id: Optional[str] = None
 
 class BoxReportIn(BaseModel):
     boxes: int = Field(ge=0)
@@ -212,23 +222,32 @@ def set_auth_cookie(response: Response, token: str):
     )
 
 # ---------- Auth routes ----------
+async def _next_employee_id() -> str:
+    count = await db.users.count_documents({"role": "worker"})
+    for i in range(count + 1, count + 500):
+        candidate = f"EMP-{i:04d}"
+        exists = await db.users.find_one({"employee_id": candidate})
+        if not exists:
+            return candidate
+    return f"EMP-{uuid.uuid4().hex[:8].upper()}"
+
 @api.post("/auth/login")
 async def login(body: LoginIn, response: Response):
     email = body.email.strip().lower()
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    if user.get("role") == "worker":
-        # Workers no longer log in — they are identified by their QR name tag scanned by supervisors.
-        raise HTTPException(
-            status_code=403,
-            detail="Workers no longer log in. Ask your supervisor to scan your QR name tag for each completed box.",
-        )
     token = create_token(user["id"], user["role"])
     set_auth_cookie(response, token)
     return {
         "token": token,
-        "user": {"id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"]},
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": user["role"],
+            "employee_id": user.get("employee_id"),
+        },
     }
 
 @api.post("/auth/logout")
@@ -247,11 +266,19 @@ async def register(body: RegisterIn, response: Response):
     if existing:
         raise HTTPException(status_code=400, detail="An account with this email already exists")
     user_id = str(uuid.uuid4())
+    emp_id = (body.employee_id or "").strip()
+    if emp_id:
+        clash = await db.users.find_one({"employee_id": emp_id})
+        if clash:
+            raise HTTPException(status_code=400, detail="Employee ID already in use")
+    else:
+        emp_id = await _next_employee_id()
     doc = {
         "id": user_id,
         "email": email,
         "name": body.name.strip(),
         "role": "worker",
+        "employee_id": emp_id,
         "job_role": (body.job_role or "").strip() or None,
         "password_hash": hash_password(body.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -267,7 +294,13 @@ async def register(body: RegisterIn, response: Response):
 
 @api.get("/auth/me", response_model=UserOut)
 async def me(user: dict = Depends(get_current_user)):
-    return UserOut(id=user["id"], email=user["email"], name=user["name"], role=user["role"])
+    return UserOut(
+        id=user["id"],
+        email=user["email"],
+        name=user["name"],
+        role=user["role"],
+        employee_id=user.get("employee_id"),
+    )
 
 # ---------- Workers management (admin) ----------
 @api.get("/workers")
@@ -281,11 +314,19 @@ async def create_worker(body: WorkerCreate, _: dict = Depends(require_admin)):
     existing = await db.users.find_one({"email": email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already exists")
+    emp_id = (body.employee_id or "").strip()
+    if emp_id:
+        clash = await db.users.find_one({"employee_id": emp_id})
+        if clash:
+            raise HTTPException(status_code=400, detail="Employee ID already in use")
+    else:
+        emp_id = await _next_employee_id()
     doc = {
         "id": str(uuid.uuid4()),
         "email": email,
         "name": body.name.strip(),
         "role": "worker",
+        "employee_id": emp_id,
         "job_role": (body.job_role or "").strip() or None,
         "password_hash": hash_password(body.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -304,6 +345,13 @@ async def update_worker(worker_id: str, body: WorkerUpdate, _: dict = Depends(re
         update["password_hash"] = hash_password(body.password)
     if body.job_role is not None:
         update["job_role"] = body.job_role.strip() or None
+    if body.employee_id is not None:
+        emp_id = body.employee_id.strip()
+        if emp_id:
+            clash = await db.users.find_one({"employee_id": emp_id, "id": {"$ne": worker_id}})
+            if clash:
+                raise HTTPException(status_code=400, detail="Employee ID already in use")
+            update["employee_id"] = emp_id
     if body.assigned_worksite_ids is not None:
         ids = [s for s in (body.assigned_worksite_ids or []) if s]
         if ids:
@@ -444,11 +492,31 @@ async def _sync_pay_config_hours(worker_id: str, worker_name: str, date_s: str, 
     )
 
 @api.post("/attendance/clock-in")
-async def clock_in(user: dict = Depends(get_current_user)):
+async def clock_in(body: WorkerClockIn, user: dict = Depends(get_current_user)):
     if user["role"] != "worker":
         raise HTTPException(status_code=403, detail="Only workers can clock in")
-    today = date.today()
-    today_s = today.isoformat()
+    site, dist, err = await _resolve_worksite(body.latitude, body.longitude, body.worksite_id)
+    if err:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "You are outside the designated work location. Clock In/Clock Out is not allowed.",
+                "reason": err,
+                "distance_m": None if dist is None else int(dist),
+            },
+        )
+    worker = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    assigned = (worker or {}).get("assigned_worksite_ids") or []
+    if assigned and site["id"] not in assigned:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": f"You are not assigned to {site['name']}.",
+                "reason": "worker-not-assigned-to-worksite",
+            },
+        )
+
+    today_s = date.today().isoformat()
     existing = await db.attendance.find_one({"worker_id": user["id"], "date": today_s})
     if existing:
         if existing.get("clock_out"):
@@ -463,6 +531,16 @@ async def clock_in(user: dict = Depends(get_current_user)):
         "clock_in": now.isoformat(),
         "clock_out": None,
         "hours": None,
+        "clock_in_lat": float(body.latitude),
+        "clock_in_lng": float(body.longitude),
+        "clock_in_accuracy_m": float(body.accuracy_m) if body.accuracy_m is not None else None,
+        "clock_in_distance_m": int(dist) if dist is not None else None,
+        "worksite_id": site["id"],
+        "worksite_name": site["name"],
+        "worksite_lat": site["latitude"],
+        "worksite_lng": site["longitude"],
+        "worksite_radius_m": site["radius_m"],
+        "source": "worker_self",
         "updated_at": now.isoformat(),
     }
     await db.attendance.insert_one(doc)
@@ -470,9 +548,30 @@ async def clock_in(user: dict = Depends(get_current_user)):
     return doc
 
 @api.post("/attendance/clock-out")
-async def clock_out(user: dict = Depends(get_current_user)):
+async def clock_out(body: WorkerClockIn, user: dict = Depends(get_current_user)):
     if user["role"] != "worker":
         raise HTTPException(status_code=403, detail="Only workers can clock out")
+    site, dist, err = await _resolve_worksite(body.latitude, body.longitude, body.worksite_id)
+    if err:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "You are outside the designated work location. Clock In/Clock Out is not allowed.",
+                "reason": err,
+                "distance_m": None if dist is None else int(dist),
+            },
+        )
+    worker = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+    assigned = (worker or {}).get("assigned_worksite_ids") or []
+    if assigned and site["id"] not in assigned:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": f"You are not assigned to {site['name']}.",
+                "reason": "worker-not-assigned-to-worksite",
+            },
+        )
+
     today_s = date.today().isoformat()
     existing = await db.attendance.find_one({"worker_id": user["id"], "date": today_s})
     if not existing:
@@ -484,9 +583,18 @@ async def clock_out(user: dict = Depends(get_current_user)):
     hours = max(0.0, round((now - ci).total_seconds() / 3600, 2))
     await db.attendance.update_one(
         {"id": existing["id"]},
-        {"$set": {"clock_out": now.isoformat(), "hours": hours, "updated_at": now.isoformat()}},
+        {"$set": {
+            "clock_out": now.isoformat(),
+            "hours": hours,
+            "clock_out_lat": float(body.latitude),
+            "clock_out_lng": float(body.longitude),
+            "clock_out_accuracy_m": float(body.accuracy_m) if body.accuracy_m is not None else None,
+            "clock_out_distance_m": int(dist) if dist is not None else None,
+            "clock_out_worksite_id": site["id"],
+            "clock_out_worksite_name": site["name"],
+            "updated_at": now.isoformat(),
+        }},
     )
-    # Auto-sync into pay_configs so admin sees hours pre-filled on Hourly cells
     await _sync_pay_config_hours(user["id"], user["name"], today_s, hours, user["email"])
     return {"id": existing["id"], "clock_in": existing["clock_in"], "clock_out": now.isoformat(), "hours": hours}
 
@@ -2121,6 +2229,12 @@ async def startup():
     await db.pay_configs.create_index([("worker_id", 1), ("date", 1)], unique=True)
     await db.attendance.create_index([("worker_id", 1), ("date", 1)], unique=True)
     await db.worksites.create_index("id", unique=True)
+    await db.users.create_index("employee_id", unique=True, sparse=True)
+
+    # Backfill employee_id for workers who don't have one
+    async for w in db.users.find({"role": "worker", "employee_id": {"$exists": False}}):
+        emp = await _next_employee_id()
+        await db.users.update_one({"id": w["id"]}, {"$set": {"employee_id": emp}})
 
     # Backfill month_key + source for legacy rows (idempotent)
     async for r in db.reports.find({"month_key": {"$exists": False}}):

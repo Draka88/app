@@ -251,6 +251,7 @@ export default function AdminWorkers() {
             <table className="w-full text-sm zebra" data-testid="workers-table">
               <thead className="bg-zinc-950 text-white">
                 <tr>
+                  <th className="text-left px-3 py-2 font-heading text-xs">Emp ID</th>
                   <th className="text-left px-3 py-2 font-heading text-xs">Name</th>
                   <th className="text-left px-3 py-2 font-heading text-xs">Job role</th>
                   <th className="text-left px-3 py-2 font-heading text-xs">Assigned sites</th>
@@ -261,13 +262,16 @@ export default function AdminWorkers() {
               <tbody>
                 {workers.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-3 py-10 text-center text-zinc-500">
+                    <td colSpan={6} className="px-3 py-10 text-center text-zinc-500">
                       No workers yet. Add your first worker with the form on the left.
                     </td>
                   </tr>
                 )}
                 {workers.map((w) => (
                   <tr key={w.id} className="border-t border-zinc-100" data-testid={`worker-row-${w.id}`}>
+                    <td className="px-3 py-2 font-mono-data text-xs whitespace-nowrap" data-testid={`emp-id-${w.id}`}>
+                      {w.employee_id || <span className="text-zinc-400 italic">—</span>}
+                    </td>
                     <td className="px-3 py-2 font-heading text-base">
                       {editingId === w.id ? (
                         <input
