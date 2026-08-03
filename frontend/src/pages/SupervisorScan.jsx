@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { api, formatApiError } from "../lib/api";
 import { fmtInt, todayISO } from "../lib/format";
+import { beepSuccess, beepClockIn, beepClockOut, beepError, primeAudio } from "../lib/beep";
 import Layout from "../components/Layout";
 import BarcodeScanner from "../components/BarcodeScanner";
 import { useAuth } from "../contexts/AuthContext";
@@ -109,6 +110,7 @@ export default function SupervisorScan() {
           week_boxes: weekBoxes,
         });
         loadDay();
+        beepSuccess();
         toast.success(`+1 box · ${data.worker.name}`, { duration: 1400 });
       } else {
         // Clock-in / clock-out: need fresh GPS every scan
@@ -136,6 +138,7 @@ export default function SupervisorScan() {
           hours: data.hours,
           at: new Date().toISOString(),
         });
+        if (mode === "clock_in") beepClockIn(); else beepClockOut();
         toast.success(
           mode === "clock_in"
             ? `Clocked IN · ${data.worker?.name || data.worker_name}`
@@ -146,6 +149,7 @@ export default function SupervisorScan() {
     } catch (e) {
       const status = e.response?.status;
       const detail = e.response?.data?.detail;
+      beepError();
       if (status === 404) {
         toast.error("Unknown QR code — is this a Boxwise worker tag?");
       } else if (status === 409 && typeof detail === "string" && detail.toLowerCase().includes("your own qr")) {
@@ -191,7 +195,7 @@ export default function SupervisorScan() {
         {MODES.map((m) => (
           <button
             key={m.key}
-            onClick={() => setMode(m.key)}
+            onClick={() => { primeAudio(); setMode(m.key); }}
             className={`p-3 border-2 text-left ${mode === m.key ? "bg-zinc-950 text-white border-zinc-950" : "bg-white border-zinc-300 hover:border-zinc-950"}`}
             data-testid={`mode-${m.key}`}
           >
@@ -309,7 +313,7 @@ export default function SupervisorScan() {
               </div>
               {!scannerOn ? (
                 <button
-                  onClick={() => setScannerOn(true)}
+                  onClick={() => { primeAudio(); setScannerOn(true); }}
                   className="btn-yellow px-4 py-2.5 text-xs"
                   data-testid="start-scanner-button"
                   disabled={attnMode && (!gps || worksites.length === 0)}

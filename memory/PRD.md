@@ -53,7 +53,8 @@ Automatically calculate the total number of boxes processed by each worker every
 - **P2** — Live map preview for worksites
 
 ## Recently Completed (Feb 2026)
-- **Scanner Auto-Open + Rich Confirmation Banner** (P0 → DONE): the QR camera now opens automatically the moment a supervisor lands on Scan Station in `+1 Box` mode — no button tap required. After each scan, the `LAST SCAN · +1 BOX` banner shows Worker Name, Job Role, Date/Time, plus two tiles: **TODAY** and **THIS WEEK** (fetched live from `/api/workers/{id}/scan-summary`). Works over HTTPS on Android & iPhone browsers via `html5-qrcode`.
+- **Beep + Haptic Feedback On Scan** (P2 → DONE): every scan now plays a short WebAudio tone (no asset download) and pings `navigator.vibrate` on Android. Four distinct patterns — high square beep for `+1 box`, rising two-tone for Clock In, descending two-tone for Clock Out, low sawtooth buzz for rejections. Audio context is primed on the first user gesture so Mobile Safari plays through.
+- **Scanner Auto-Open + Rich Confirmation Banner** (P0 → DONE)
 - **Supervisor Worker Lookup + Scan Correction** (P1 → DONE)
 - **Worker Password Reset** (P2 → DONE): forgot-password flow via Emergent-managed Resend. New endpoints `POST /api/auth/forgot-password` (worker-only; admin emails silently ignored) and `POST /api/auth/reset-password`. Secure random URL-safe token (32 bytes) stored in `password_reset_tokens`, expires in **30 minutes**, single-use, invalidates prior unused tokens on new request. Response is always generic to prevent email enumeration. Sender: `Boxwise` via managed Resend proxy. New pages `/forgot-password` and `/reset-password?token=…` plus a "Forgot password?" link on the login screen.
 - **Worker Login Restored** (P0 → DONE)
