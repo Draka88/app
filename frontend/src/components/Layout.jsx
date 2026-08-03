@@ -17,7 +17,7 @@ export default function Layout({ children }) {
               <div>
                 <div className="font-heading text-lg leading-none">BOXWISE</div>
                 <div className="text-[10px] uppercase tracking-widest text-zinc-400">
-                  {isAdmin ? "Admin Console" : "Worker App"}
+                  {isAdmin ? "Supervisor Console" : "Worker App"}
                 </div>
               </div>
             </Link>
@@ -25,11 +25,10 @@ export default function Layout({ children }) {
             <nav className="hidden md:flex items-center gap-2 ml-6">
               {isAdmin ? (
                 <>
-                  <NavLink to="/" active={loc.pathname === "/"} label="Payroll" testid="nav-payroll" />
+                  <NavLink to="/" active={loc.pathname === "/"} label="Scan" testid="nav-scan" />
+                  <NavLink to="/payroll" active={loc.pathname === "/payroll"} label="Payroll" testid="nav-payroll" />
                   <NavLink to="/reports" active={loc.pathname === "/reports"} label="Reports" testid="nav-reports" />
                   <NavLink to="/workers" active={loc.pathname === "/workers"} label="Workers" testid="nav-workers" />
-                  <NavLink to="/whitelist" active={loc.pathname === "/whitelist"} label="Whitelist" testid="nav-whitelist" />
-                  <NavLink to="/generator" active={loc.pathname === "/generator"} label="Generate" testid="nav-generator" />
                   <NavLink to="/payconfig" active={loc.pathname === "/payconfig"} label="Pay Method" testid="nav-payconfig" />
                   <NavLink to="/settings" active={loc.pathname === "/settings"} label="Rate" testid="nav-settings" />
                 </>

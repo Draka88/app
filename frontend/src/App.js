@@ -4,7 +4,7 @@ import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
-import WorkerDashboard from "./pages/WorkerDashboard";
+import SupervisorScan from "./pages/SupervisorScan";
 import AdminPayroll from "./pages/AdminPayroll";
 import AdminWorkers from "./pages/AdminWorkers";
 import AdminSettings from "./pages/AdminSettings";
@@ -38,7 +38,8 @@ function AppRoutes() {
   if (user.role === "admin") {
     return (
       <Routes>
-        <Route path="/" element={<AdminPayroll />} />
+        <Route path="/" element={<SupervisorScan />} />
+        <Route path="/payroll" element={<AdminPayroll />} />
         <Route path="/reports" element={<AdminReports />} />
         <Route path="/workers" element={<AdminWorkers />} />
         <Route path="/whitelist" element={<AdminWhitelist />} />
@@ -49,10 +50,10 @@ function AppRoutes() {
       </Routes>
     );
   }
+  // Workers no longer log in — block any stale sessions
   return (
     <Routes>
-      <Route path="/" element={<WorkerDashboard />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   );
 }

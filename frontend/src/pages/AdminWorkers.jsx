@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { api, formatApiError } from "../lib/api";
+import { api, API, formatApiError } from "../lib/api";
 import Layout from "../components/Layout";
 import { toast } from "sonner";
 
@@ -205,11 +205,35 @@ export default function AdminWorkers() {
         </form>
 
         <div className="card-sharp p-6 lg:col-span-3">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
             <h2 className="font-heading text-2xl">Roster</h2>
-            <span className="text-[10px] uppercase tracking-widest text-zinc-500">
-              {workers.length} {workers.length === 1 ? "worker" : "workers"}
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+                {workers.length} {workers.length === 1 ? "worker" : "workers"}
+              </span>
+              <button
+                onClick={() => {
+                  fetch(`${API}/workers/nametags`, {
+                    credentials: "include",
+                    headers: { Authorization: `Bearer ${localStorage.getItem("bw_token") || ""}` },
+                  })
+                    .then((r) => { if (!r.ok) throw new Error(); return r.blob(); })
+                    .then((blob) => {
+                      const a = document.createElement("a");
+                      const url = URL.createObjectURL(blob);
+                      a.href = url; a.download = "worker_nametags.pdf";
+                      document.body.appendChild(a); a.click(); a.remove();
+                      URL.revokeObjectURL(url);
+                      toast.success("All QR name tags downloaded");
+                    })
+                    .catch(() => toast.error("Download failed"));
+                }}
+                className="btn-outline-ink px-3 py-1.5 text-xs"
+                data-testid="download-all-nametags"
+              >
+                ↓ All QR name tags
+              </button>
+            </div>
           </div>
           <div className="overflow-x-auto border border-zinc-200">
             <table className="w-full text-sm zebra" data-testid="workers-table">
@@ -288,6 +312,27 @@ export default function AdminWorkers() {
                         </>
                       ) : (
                         <>
+                          <button
+                            onClick={() => {
+                              fetch(`${API}/workers/${w.id}/nametag`, {
+                                credentials: "include",
+                                headers: { Authorization: `Bearer ${localStorage.getItem("bw_token") || ""}` },
+                              })
+                                .then((r) => { if (!r.ok) throw new Error(); return r.blob(); })
+                                .then((blob) => {
+                                  const a = document.createElement("a");
+                                  const url = URL.createObjectURL(blob);
+                                  a.href = url; a.download = `nametag_${w.name.replace(/\s+/g, "_")}.pdf`;
+                                  document.body.appendChild(a); a.click(); a.remove();
+                                  URL.revokeObjectURL(url);
+                                })
+                                .catch(() => toast.error("Download failed"));
+                            }}
+                            className="text-xs font-bold text-zinc-950 border border-zinc-300 px-2 py-1 hover:bg-zinc-950 hover:text-white transition-colors duration-150"
+                            data-testid={`nametag-${w.id}`}
+                          >
+                            ↓ QR tag
+                          </button>
                           <button
                             onClick={() => startEdit(w)}
                             className="text-xs font-bold text-zinc-950 border border-zinc-300 px-2 py-1 hover:bg-zinc-950 hover:text-white transition-colors duration-150"

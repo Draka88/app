@@ -195,6 +195,12 @@ async def login(body: LoginIn, response: Response):
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    if user.get("role") == "worker":
+        # Workers no longer log in — they are identified by their QR name tag scanned by supervisors.
+        raise HTTPException(
+            status_code=403,
+            detail="Workers no longer log in. Ask your supervisor to scan your QR name tag for each completed box.",
+        )
     token = create_token(user["id"], user["role"])
     set_auth_cookie(response, token)
     return {
@@ -548,6 +554,48 @@ async def create_report(body: BoxReportIn, user: dict = Depends(get_current_user
     return doc
 
 # ---------- Barcode scans ----------
+@api.post("/scans/for-worker")
+async def create_worker_scan(body: dict, user: dict = Depends(require_admin)):
+    """Supervisor scans a worker's QR name tag. Each scan = +1 box for that worker. No dedupe."""
+    worker_qr = (body.get("worker_id") or body.get("barcode") or "").strip()
+    if not worker_qr:
+        raise HTTPException(status_code=400, detail="worker_id (or QR barcode) is required")
+    if worker_qr.startswith("BW-W:"):
+        worker_qr = worker_qr[5:]
+    worker = await db.users.find_one({"id": worker_qr, "role": "worker"}, {"_id": 0, "password_hash": 0})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found for this QR code")
+    now = datetime.now(timezone.utc)
+    today = date.today()
+    two_s_ago = (now - timedelta(seconds=2)).isoformat()
+    burst = await db.reports.find_one({
+        "worker_id": worker["id"],
+        "supervisor_id": user["id"],
+        "source": "supervisor_scan",
+        "created_at": {"$gte": two_s_ago},
+    })
+    if burst:
+        raise HTTPException(status_code=429, detail="Slow down — same worker scanned less than 2s ago")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "worker_id": worker["id"],
+        "worker_name": worker["name"],
+        "date": today.isoformat(),
+        "boxes": 1,
+        "barcode": f"BW-W:{worker['id']}",
+        "source": "supervisor_scan",
+        "supervisor_id": user["id"],
+        "supervisor_name": user["name"],
+        "supervisor_email": user["email"],
+        "note": None,
+        "week_key": iso_week_key(today),
+        "month_key": month_key(today),
+        "created_at": now.isoformat(),
+    }
+    await db.reports.insert_one(doc)
+    doc.pop("_id", None)
+    return {**doc, "worker": {"id": worker["id"], "name": worker["name"], "job_role": worker.get("job_role")}}
+
 @api.post("/scans", response_model=BoxReportOut)
 async def create_scan(body: ScanIn, user: dict = Depends(get_current_user)):
     if user["role"] != "worker":
@@ -1371,6 +1419,82 @@ async def payroll_xlsx(period: str = "week", key: Optional[str] = None, _: dict 
         ws.column_dimensions[col].width = wd
 
     return _xlsx_response(wb, f"payroll_{k}.xlsx")
+
+# ---------- Worker QR nametags ----------
+def _build_nametag_pdf(workers: list) -> bytes:
+    from reportlab.pdfgen import canvas
+    from reportlab.graphics.barcode.qr import QrCodeWidget
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics import renderPDF
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+    # 2 columns × 4 rows = 8 name tags per A4 page (large, printable)
+    cols, rows = 2, 4
+    margin_x, margin_y = 12 * mm, 12 * mm
+    cell_w = (W - 2 * margin_x) / cols
+    cell_h = (H - 2 * margin_y) / rows
+    idx = 0
+    while idx < len(workers):
+        for r in range(rows):
+            for col in range(cols):
+                if idx >= len(workers):
+                    break
+                w = workers[idx]
+                x = margin_x + col * cell_w
+                y = H - margin_y - (r + 1) * cell_h
+                # Border
+                c.setStrokeColorRGB(0.15, 0.15, 0.15); c.setLineWidth(1.2)
+                c.rect(x + 3, y + 3, cell_w - 6, cell_h - 6)
+                # Yellow accent band
+                c.setFillColorRGB(0.918, 0.702, 0.031)  # #eab308
+                c.rect(x + 3, y + cell_h - 15, cell_w - 6, 12, fill=1, stroke=0)
+                c.setFillColorRGB(0, 0, 0)
+                c.setFont("Helvetica-Bold", 8)
+                c.drawString(x + 6, y + cell_h - 12, "BOXWISE · WORKER ID")
+                # QR
+                qr = QrCodeWidget(f"BW-W:{w['id']}", barLevel="M")
+                bounds = qr.getBounds()
+                qw = bounds[2] - bounds[0]; qh = bounds[3] - bounds[1]
+                target = min(cell_w * 0.42, cell_h * 0.55)
+                d = Drawing(target, target, transform=[target / qw, 0, 0, target / qh, 0, 0])
+                d.add(qr)
+                renderPDF.draw(d, c, x + 8 * mm, y + 8 * mm)
+                # Name + role on the right
+                text_x = x + 8 * mm + target + 6 * mm
+                c.setFont("Helvetica-Bold", 20)
+                c.setFillColorRGB(0, 0, 0)
+                c.drawString(text_x, y + cell_h - 30 * mm, w["name"][:22])
+                c.setFont("Helvetica", 10)
+                c.setFillColorRGB(0.4, 0.4, 0.4)
+                if w.get("job_role"):
+                    c.drawString(text_x, y + cell_h - 38 * mm, w["job_role"][:24])
+                c.setFont("Helvetica-Oblique", 8)
+                c.setFillColorRGB(0.5, 0.5, 0.5)
+                c.drawString(text_x, y + 8 * mm, "Supervisor scans this tag = +1 box")
+                idx += 1
+        c.showPage()
+    c.save()
+    return buf.getvalue()
+
+@api.get("/workers/{worker_id}/nametag")
+async def worker_nametag(worker_id: str, _: dict = Depends(require_admin)):
+    w = await db.users.find_one({"id": worker_id, "role": "worker"}, {"_id": 0, "password_hash": 0})
+    if not w:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    pdf = _build_nametag_pdf([w])
+    filename = f"nametag_{w['name'].replace(' ', '_')}.pdf"
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+@api.get("/workers/nametags")
+async def worker_nametags(_: dict = Depends(require_admin)):
+    workers = await db.users.find({"role": "worker"}, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(1000)
+    if not workers:
+        raise HTTPException(status_code=404, detail="No workers to print")
+    pdf = _build_nametag_pdf(workers)
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
+                             headers={"Content-Disposition": 'attachment; filename="worker_nametags.pdf"'})
 
 # ---------- Barcode label generator ----------
 LABEL_TEMPLATES = {
