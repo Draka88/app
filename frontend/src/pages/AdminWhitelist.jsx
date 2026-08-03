@@ -1,31 +1,22 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { api, API, formatApiError } from "../lib/api";
-import { isoWeekKey } from "../lib/format";
+import { isoWeekKey, todayISO, weekLabel } from "../lib/format";
 import Layout from "../components/Layout";
 import { toast } from "sonner";
 
-function todayISO() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-// Given an ISO week key like "2026-W31", return 7 dates Mon..Sun
+// Payroll week is Wed → Tue.
 function weekDates(wk) {
-  const [y, w] = wk.split("-W").map(Number);
-  // ISO week starts on Monday. Compute Monday of the given ISO week.
-  const jan4 = new Date(Date.UTC(y, 0, 4));
-  const jan4Day = jan4.getUTCDay() || 7;
-  const week1Monday = new Date(jan4);
-  week1Monday.setUTCDate(jan4.getUTCDate() - (jan4Day - 1));
-  const monday = new Date(week1Monday);
-  monday.setUTCDate(week1Monday.getUTCDate() + (w - 1) * 7);
+  if (!wk || !wk.startsWith("W")) return Array(7).fill("");
+  const wed = new Date(wk.slice(1) + "T00:00:00");
   return Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(monday);
-    d.setUTCDate(monday.getUTCDate() + i);
-    return d.toISOString().slice(0, 10);
+    const d = new Date(wed); d.setDate(wed.getDate() + i);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
   });
 }
-const WEEKDAY_LABELS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+const WEEKDAY_LABELS = ["WED", "THU", "FRI", "SAT", "SUN", "MON", "TUE"];
 
 export default function AdminWhitelist() {
   const [mode, setMode] = useState("day"); // day | week
@@ -252,17 +243,17 @@ export default function AdminWhitelist() {
           ) : (
             <>
               <div>
-                <label className="block font-heading text-xs mb-1 text-zinc-700">ISO Week</label>
+                <label className="block font-heading text-xs mb-1 text-zinc-700">Payroll Week (Wed → Tue)</label>
                 <input
                   type="text"
                   value={week}
                   onChange={(e) => setWeek(e.target.value)}
-                  placeholder="2026-W31"
+                  placeholder="W2026-08-05"
                   className="input-sharp font-mono-data"
                   data-testid="whitelist-week"
                 />
                 <div className="text-[11px] text-zinc-500 mt-1 font-mono-data">
-                  {dates[0]} → {dates[6]}
+                  {weekLabel(week)}
                 </div>
               </div>
               <div>

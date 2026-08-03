@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { api, API, formatApiError } from "../lib/api";
-import { fmtAUD, fmtInt, isoWeekKey } from "../lib/format";
+import { fmtAUD, fmtInt, isoWeekKey, weekLabel } from "../lib/format";
 import Layout from "../components/Layout";
 import { toast } from "sonner";
 import {
@@ -213,7 +213,7 @@ export default function AdminPayroll() {
               data-testid="admin-week-selector"
             >
               {weeks.map((w) => (
-                <option key={w} value={w}>{w}</option>
+                <option key={w} value={w}>{weekLabel(w)}</option>
               ))}
             </select>
           </div>

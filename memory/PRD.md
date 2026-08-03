@@ -53,7 +53,8 @@ Automatically calculate the total number of boxes processed by each worker every
 - **P2** — Live map preview for worksites
 
 ## Recently Completed (Feb 2026)
-- **Logout + Idle Auto-Logout** (P1 → DONE): every logged-in role sees a "Sign out" button top-right of the header (Workers, Supervisors, Admins — all use `Layout`). Click prompts confirmation, calls `POST /api/auth/logout` (clears the `access_token` httpOnly cookie server-side) + removes `bw_token` from localStorage + redirects to `/login`. Backend verified: cookie cleared, `/auth/me` returns 401 post-logout. Idle auto-logout: **30 min** of no mouse/touch/keyboard/scroll activity, with a **60s warning** toast, then automatic sign-out.
+- **Wed → Tue Payroll Weeks** (P1 → DONE): switched the week convention from ISO (Mon–Sun) to **Wed 00:00 → Tue 23:59**. Backend `iso_week_key` now returns `W{YYYY-MM-DD}` where the date is the Wednesday anchor (e.g. `W2026-08-05`); `week_range` returns (Wed, Tue). New helper `format_week_label` outputs "Wed Aug 5 → Tue Aug 11, 2026". `/api/weeks` now returns a `labeled` array with `{key, label, start, end}`. Legacy `YYYY-Www` week_keys on report rows are backfilled at startup. All existing endpoints (`/summary/weekly`, `/summary/period?period=week`, `/payroll/xlsx`, payslip PDF/Excel) automatically use the new range. Frontend: shared `isoWeekKey()` + `weekLabel()`, human-readable labels in every week dropdown and input across Payroll, Reports, Pay Method, Whitelist, and Worker Dashboard.
+- **Logout + Idle Auto-Logout** (P1 → DONE)
 - **Beep + Haptic Feedback On Scan** (P2 → DONE)
 - **Scanner Auto-Open + Rich Confirmation Banner** (P0 → DONE)
 - **Supervisor Worker Lookup + Scan Correction** (P1 → DONE)

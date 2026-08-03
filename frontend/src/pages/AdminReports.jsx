@@ -1,24 +1,12 @@
 import { useEffect, useState, useCallback } from "react";
 import { api, API, formatApiError } from "../lib/api";
-import { fmtAUD, fmtInt } from "../lib/format";
+import { fmtAUD, fmtInt, isoWeekKey, todayISO, weekLabel } from "../lib/format";
 import Layout from "../components/Layout";
 import { toast } from "sonner";
 
-function todayISO() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 function monthKeyNow() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-function isoWeekKey(d = new Date()) {
-  const dt = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const dn = dt.getUTCDay() || 7;
-  dt.setUTCDate(dt.getUTCDate() + 4 - dn);
-  const ys = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
-  const w = Math.ceil(((dt - ys) / 86400000 + 1) / 7);
-  return `${dt.getUTCFullYear()}-W${String(w).padStart(2, "0")}`;
 }
 
 export default function AdminReports() {
@@ -61,7 +49,7 @@ export default function AdminReports() {
   };
 
   const inputType = period === "day" ? "date" : "text";
-  const inputPlaceholder = period === "week" ? "2026-W31" : period === "month" ? "2026-08" : "";
+  const inputPlaceholder = period === "week" ? "W2026-08-05" : period === "month" ? "2026-08" : "";
 
   return (
     <Layout>
@@ -90,7 +78,7 @@ export default function AdminReports() {
         </div>
         <div>
           <label className="block font-heading text-xs mb-1 text-zinc-700">
-            {period === "day" ? "Date" : period === "week" ? "ISO week" : "Month"}
+            {period === "day" ? "Date" : period === "week" ? "Payroll week (Wed → Tue)" : "Month"}
           </label>
           <input
             type={inputType}
@@ -100,6 +88,9 @@ export default function AdminReports() {
             className="input-sharp font-mono-data min-w-[180px]"
             data-testid="period-key-input"
           />
+          {period === "week" && key && key.startsWith("W") && (
+            <div className="text-[10px] uppercase tracking-widest text-zinc-500 mt-1">{weekLabel(key)}</div>
+          )}
         </div>
         <div className="ml-auto flex gap-2">
           <button

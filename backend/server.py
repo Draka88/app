@@ -77,17 +77,28 @@ def create_token(user_id: str, role: str, minutes: int = 60 * 24 * 7) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 
 def iso_week_key(d: date) -> str:
-    y, w, _ = d.isocalendar()
-    return f"{y}-W{w:02d}"
+    """Payroll week runs Wed → Tue. Key encodes the Wednesday anchor date, e.g. 'W2026-08-05'."""
+    # weekday(): Mon=0 Tue=1 Wed=2 Thu=3 Fri=4 Sat=5 Sun=6
+    wed = d - td(days=(d.weekday() - 2) % 7)
+    return f"W{wed.isoformat()}"
 
 def month_key(d: date) -> str:
     return f"{d.year}-{d.month:02d}"
 
 def week_range(week_key: str):
-    y, w = week_key.split("-W")
-    monday = date.fromisocalendar(int(y), int(w), 1)
-    sunday = monday + td(days=6)
-    return monday, sunday
+    """Return (Wednesday, next Tuesday) for a Wed-anchored key. Handles legacy 'YYYY-Www' too."""
+    if week_key.startswith("W"):
+        wed = date.fromisoformat(week_key[1:])
+    else:
+        y, w = week_key.split("-W")
+        monday = date.fromisocalendar(int(y), int(w), 1)
+        wed = monday + td(days=2)
+    tue = wed + td(days=6)
+    return wed, tue
+
+def format_week_label(week_key: str) -> str:
+    wed, tue = week_range(week_key)
+    return f"Wed {wed.strftime('%b %-d')} → Tue {tue.strftime('%b %-d')}, {tue.year}"
 
 # ---------- Models ----------
 class UserOut(BaseModel):
@@ -1841,11 +1852,14 @@ async def weekly_summary(week: Optional[str] = None, _: dict = Depends(require_a
 async def list_weeks(user: dict = Depends(get_current_user)):
     q = {} if user["role"] == "admin" else {"worker_id": user["id"]}
     weeks = await db.reports.distinct("week_key", q)
-    weeks.sort(reverse=True)
-    current = iso_week_key(date.today())
-    if current not in weeks:
-        weeks.insert(0, current)
-    return {"weeks": weeks, "current": current}
+    # Ensure last 8 upcoming/current keys are present even without data
+    today = date.today()
+    for i in range(-8, 1):
+        weeks.append(iso_week_key(today + td(days=i * 7)))
+    weeks = sorted({w for w in weeks if w and w.startswith("W")}, reverse=True)
+    current = iso_week_key(today)
+    labeled = [{"key": w, "label": format_week_label(w), **dict(zip(("start", "end"), (r.isoformat() for r in week_range(w))))} for w in weeks]
+    return {"weeks": weeks, "current": current, "labeled": labeled}
 
 # ---------- Payslip PDF ----------
 def _build_payslip_pdf(*, company: str, worker_name: str, worker_email: str,
@@ -2429,6 +2443,17 @@ async def startup():
                 {"id": r["id"]},
                 {"$set": {"month_key": month_key(d), "source": r.get("source") or "manual"}},
             )
+        except Exception:
+            pass
+
+    # Backfill Wed-anchored week_key on legacy 'YYYY-Www' rows or missing keys
+    async for r in db.reports.find({"$or": [
+        {"week_key": {"$exists": False}},
+        {"week_key": {"$not": {"$regex": "^W"}}},
+    ]}):
+        try:
+            d = date.fromisoformat(r["date"])
+            await db.reports.update_one({"id": r["id"]}, {"$set": {"week_key": iso_week_key(d)}})
         except Exception:
             pass
 

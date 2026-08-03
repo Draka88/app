@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { api, API, formatApiError } from "../lib/api";
-import { fmtAUD, fmtInt, isoWeekKey } from "../lib/format";
+import { fmtAUD, fmtInt, isoWeekKey, weekLabel } from "../lib/format";
 import Layout from "../components/Layout";
 import { useAuth } from "../contexts/AuthContext";
 import { toast } from "sonner";
@@ -139,7 +139,7 @@ export default function WorkerDashboard() {
         <div>
           <label className="block font-heading text-xs mb-1 text-zinc-700">Week</label>
           <select className="input-sharp min-w-[180px]" value={week} onChange={(e) => setWeek(e.target.value)} data-testid="week-selector">
-            {weeks.map((w) => <option key={w} value={w}>{w}</option>)}
+            {weeks.map((w) => <option key={w} value={w}>{weekLabel(w)}</option>)}
           </select>
         </div>
       </div>
