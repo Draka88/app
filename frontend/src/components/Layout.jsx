@@ -49,9 +49,12 @@ export default function Layout({ children }) {
                 </div>
               </div>
               <button
-                onClick={logout}
+                onClick={() => {
+                  if (window.confirm("Sign out now?")) logout();
+                }}
                 className="btn-outline-ink border-white text-white hover:bg-white hover:text-zinc-950 px-3 py-2 text-xs"
                 data-testid="logout-button"
+                title="Sign out (auto-logout after 30 min idle)"
               >
                 Sign out
               </button>

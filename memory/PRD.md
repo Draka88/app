@@ -53,7 +53,8 @@ Automatically calculate the total number of boxes processed by each worker every
 - **P2** — Live map preview for worksites
 
 ## Recently Completed (Feb 2026)
-- **Beep + Haptic Feedback On Scan** (P2 → DONE): every scan now plays a short WebAudio tone (no asset download) and pings `navigator.vibrate` on Android. Four distinct patterns — high square beep for `+1 box`, rising two-tone for Clock In, descending two-tone for Clock Out, low sawtooth buzz for rejections. Audio context is primed on the first user gesture so Mobile Safari plays through.
+- **Logout + Idle Auto-Logout** (P1 → DONE): every logged-in role sees a "Sign out" button top-right of the header (Workers, Supervisors, Admins — all use `Layout`). Click prompts confirmation, calls `POST /api/auth/logout` (clears the `access_token` httpOnly cookie server-side) + removes `bw_token` from localStorage + redirects to `/login`. Backend verified: cookie cleared, `/auth/me` returns 401 post-logout. Idle auto-logout: **30 min** of no mouse/touch/keyboard/scroll activity, with a **60s warning** toast, then automatic sign-out.
+- **Beep + Haptic Feedback On Scan** (P2 → DONE)
 - **Scanner Auto-Open + Rich Confirmation Banner** (P0 → DONE)
 - **Supervisor Worker Lookup + Scan Correction** (P1 → DONE)
 - **Worker Password Reset** (P2 → DONE): forgot-password flow via Emergent-managed Resend. New endpoints `POST /api/auth/forgot-password` (worker-only; admin emails silently ignored) and `POST /api/auth/reset-password`. Secure random URL-safe token (32 bytes) stored in `password_reset_tokens`, expires in **30 minutes**, single-use, invalidates prior unused tokens on new request. Response is always generic to prevent email enumeration. Sender: `Boxwise` via managed Resend proxy. New pages `/forgot-password` and `/reset-password?token=…` plus a "Forgot password?" link on the login screen.
