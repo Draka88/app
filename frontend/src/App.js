@@ -16,6 +16,7 @@ import AdminGenerator from "./pages/AdminGenerator";
 import AdminPayConfig from "./pages/AdminPayConfig";
 import AdminWorksites from "./pages/AdminWorksites";
 import AdminAttendance from "./pages/AdminAttendance";
+import AdminQRCodes from "./pages/AdminQRCodes";
 import WorkerDashboard from "./pages/WorkerDashboard";
 
 function Loading() {
@@ -54,6 +55,7 @@ function AppRoutes() {
         <Route path="/payconfig" element={<AdminPayConfig />} />
         <Route path="/worksites" element={<AdminWorksites />} />
         <Route path="/attendance" element={<AdminAttendance />} />
+        <Route path="/qr-codes" element={<AdminQRCodes />} />
         <Route path="/settings" element={<AdminSettings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

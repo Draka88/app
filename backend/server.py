@@ -2150,15 +2150,132 @@ async def payroll_xlsx(period: str = "week", key: Optional[str] = None, _: dict 
     return _xlsx_response(wb, f"payroll_{k}.xlsx")
 
 # ---------- Worker QR nametags ----------
-def _build_nametag_pdf(workers: list) -> bytes:
-    from reportlab.pdfgen import canvas
+def _draw_qr(c, data: str, x, y, size):
+    """Draw a QR code at (x, y) with given size on ReportLab canvas."""
     from reportlab.graphics.barcode.qr import QrCodeWidget
     from reportlab.graphics.shapes import Drawing
     from reportlab.graphics import renderPDF
+    qr = QrCodeWidget(data, barLevel="M")
+    b = qr.getBounds()
+    qw = b[2] - b[0]; qh = b[3] - b[1]
+    d = Drawing(size, size, transform=[size / qw, 0, 0, size / qh, 0, 0])
+    d.add(qr)
+    renderPDF.draw(d, c, x, y)
+
+def _build_nametag_pdf(workers: list, template: str = "nametag") -> bytes:
+    """Available templates:
+      - nametag   : 2×4 large printable badges (default, existing look)
+      - sticker   : 3×10 Avery-style stickers (30 per page) — small QR + name + emp id
+      - idcard    : 2×5 wallet ID cards (10 per page) — QR + name + emp id + role
+      - grid      : 5×8 compact QR grid (40 per page) — QR + short name
+    """
+    from reportlab.pdfgen import canvas
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     W, H = A4
-    # 2 columns × 4 rows = 8 name tags per A4 page (large, printable)
+
+    def _emp(w): return w.get("employee_id") or "—"
+
+    if template == "sticker":
+        cols, rows = 3, 10
+        mx, my = 6 * mm, 12 * mm
+        cw = (W - 2 * mx) / cols
+        ch = (H - 2 * my) / rows
+        idx = 0
+        while idx < len(workers):
+            for r in range(rows):
+                for col in range(cols):
+                    if idx >= len(workers): break
+                    w = workers[idx]
+                    x = mx + col * cw
+                    y = H - my - (r + 1) * ch
+                    c.setStrokeColorRGB(0.85, 0.85, 0.85); c.setLineWidth(0.4)
+                    c.rect(x + 2, y + 2, cw - 4, ch - 4)
+                    qs = ch - 8
+                    _draw_qr(c, f"BW-W:{w['id']}", x + 4, y + 4, qs)
+                    tx = x + qs + 8
+                    c.setFillColorRGB(0, 0, 0)
+                    c.setFont("Helvetica-Bold", 10)
+                    c.drawString(tx, y + ch - 12, (w["name"] or "")[:18])
+                    c.setFont("Helvetica", 7)
+                    c.setFillColorRGB(0.35, 0.35, 0.35)
+                    c.drawString(tx, y + ch - 22, f"ID: {_emp(w)}")
+                    if w.get("job_role"):
+                        c.setFont("Helvetica-Oblique", 6.5)
+                        c.drawString(tx, y + 6, w["job_role"][:22])
+                    idx += 1
+            c.showPage()
+        c.save()
+        return buf.getvalue()
+
+    if template == "idcard":
+        cols, rows = 2, 5
+        mx, my = 12 * mm, 10 * mm
+        cw = (W - 2 * mx) / cols
+        ch = (H - 2 * my) / rows
+        idx = 0
+        while idx < len(workers):
+            for r in range(rows):
+                for col in range(cols):
+                    if idx >= len(workers): break
+                    w = workers[idx]
+                    x = mx + col * cw
+                    y = H - my - (r + 1) * ch
+                    # Card frame
+                    c.setFillColorRGB(0.036, 0.036, 0.043)  # zinc-950
+                    c.rect(x + 4, y + 4, cw - 8, ch - 8, fill=1, stroke=0)
+                    c.setFillColorRGB(0.918, 0.702, 0.031)  # yellow
+                    c.rect(x + 4, y + ch - 22, cw - 8, 18, fill=1, stroke=0)
+                    c.setFillColorRGB(0, 0, 0)
+                    c.setFont("Helvetica-Bold", 9)
+                    c.drawString(x + 10, y + ch - 16, "BOXWISE · WORKER")
+                    # QR on left inside card
+                    _draw_qr(c, f"BW-W:{w['id']}", x + 10, y + 12, ch - 40)
+                    # Text
+                    tx = x + 10 + (ch - 40) + 8
+                    c.setFillColorRGB(1, 1, 1)
+                    c.setFont("Helvetica-Bold", 13)
+                    c.drawString(tx, y + ch - 42, (w["name"] or "")[:18])
+                    c.setFont("Helvetica", 9)
+                    c.setFillColorRGB(0.72, 0.72, 0.75)
+                    c.drawString(tx, y + ch - 58, f"ID: {_emp(w)}")
+                    if w.get("job_role"):
+                        c.drawString(tx, y + ch - 72, w["job_role"][:22])
+                    c.setFont("Helvetica-Oblique", 7)
+                    c.setFillColorRGB(0.55, 0.55, 0.6)
+                    c.drawString(tx, y + 14, "Supervisor scans this = +1 box")
+                    idx += 1
+            c.showPage()
+        c.save()
+        return buf.getvalue()
+
+    if template == "grid":
+        cols, rows = 5, 8
+        mx, my = 10 * mm, 12 * mm
+        cw = (W - 2 * mx) / cols
+        ch = (H - 2 * my) / rows
+        idx = 0
+        while idx < len(workers):
+            for r in range(rows):
+                for col in range(cols):
+                    if idx >= len(workers): break
+                    w = workers[idx]
+                    x = mx + col * cw
+                    y = H - my - (r + 1) * ch
+                    qs = min(cw, ch) - 20
+                    _draw_qr(c, f"BW-W:{w['id']}", x + (cw - qs) / 2, y + 14, qs)
+                    c.setFillColorRGB(0, 0, 0)
+                    c.setFont("Helvetica-Bold", 8)
+                    c.drawCentredString(x + cw / 2, y + 6, (w["name"] or "")[:16])
+                    c.setFont("Helvetica", 6)
+                    c.setFillColorRGB(0.4, 0.4, 0.4)
+                    c.drawCentredString(x + cw / 2, y + 0, _emp(w))
+                    idx += 1
+            c.showPage()
+        c.save()
+        return buf.getvalue()
+
+    # Default: nametag (2×4 large)
     cols, rows = 2, 4
     margin_x, margin_y = 12 * mm, 12 * mm
     cell_w = (W - 2 * margin_x) / cols
@@ -2167,29 +2284,19 @@ def _build_nametag_pdf(workers: list) -> bytes:
     while idx < len(workers):
         for r in range(rows):
             for col in range(cols):
-                if idx >= len(workers):
-                    break
+                if idx >= len(workers): break
                 w = workers[idx]
                 x = margin_x + col * cell_w
                 y = H - margin_y - (r + 1) * cell_h
-                # Border
                 c.setStrokeColorRGB(0.15, 0.15, 0.15); c.setLineWidth(1.2)
                 c.rect(x + 3, y + 3, cell_w - 6, cell_h - 6)
-                # Yellow accent band
-                c.setFillColorRGB(0.918, 0.702, 0.031)  # #eab308
+                c.setFillColorRGB(0.918, 0.702, 0.031)
                 c.rect(x + 3, y + cell_h - 15, cell_w - 6, 12, fill=1, stroke=0)
                 c.setFillColorRGB(0, 0, 0)
                 c.setFont("Helvetica-Bold", 8)
                 c.drawString(x + 6, y + cell_h - 12, "BOXWISE · WORKER ID")
-                # QR
-                qr = QrCodeWidget(f"BW-W:{w['id']}", barLevel="M")
-                bounds = qr.getBounds()
-                qw = bounds[2] - bounds[0]; qh = bounds[3] - bounds[1]
                 target = min(cell_w * 0.42, cell_h * 0.55)
-                d = Drawing(target, target, transform=[target / qw, 0, 0, target / qh, 0, 0])
-                d.add(qr)
-                renderPDF.draw(d, c, x + 8 * mm, y + 8 * mm)
-                # Name + role on the right
+                _draw_qr(c, f"BW-W:{w['id']}", x + 8 * mm, y + 8 * mm, target)
                 text_x = x + 8 * mm + target + 6 * mm
                 c.setFont("Helvetica-Bold", 20)
                 c.setFillColorRGB(0, 0, 0)
@@ -2198,6 +2305,9 @@ def _build_nametag_pdf(workers: list) -> bytes:
                 c.setFillColorRGB(0.4, 0.4, 0.4)
                 if w.get("job_role"):
                     c.drawString(text_x, y + cell_h - 38 * mm, w["job_role"][:24])
+                c.setFont("Helvetica", 9)
+                c.setFillColorRGB(0.4, 0.4, 0.4)
+                c.drawString(text_x, y + cell_h - 44 * mm, f"ID: {_emp(w)}")
                 c.setFont("Helvetica-Oblique", 8)
                 c.setFillColorRGB(0.5, 0.5, 0.5)
                 c.drawString(text_x, y + 8 * mm, "Supervisor scans this tag = +1 box")
@@ -2205,6 +2315,28 @@ def _build_nametag_pdf(workers: list) -> bytes:
         c.showPage()
     c.save()
     return buf.getvalue()
+
+class QrCodesIn(BaseModel):
+    worker_ids: Optional[List[str]] = None
+    template: str = Field(default="nametag")
+
+@api.post("/workers/qr-codes")
+async def bulk_worker_qr(body: QrCodesIn, _: dict = Depends(require_admin)):
+    if body.template not in {"nametag", "sticker", "idcard", "grid"}:
+        raise HTTPException(status_code=400, detail="Unknown template")
+    q = {"role": "worker"}
+    if body.worker_ids:
+        q["id"] = {"$in": body.worker_ids}
+    workers = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(2000)
+    if not workers:
+        raise HTTPException(status_code=404, detail="No workers to print")
+    pdf = _build_nametag_pdf(workers, template=body.template)
+    fname = f"boxwise_qr_{body.template}_{len(workers)}workers.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 @api.get("/workers/{worker_id}/nametag")
 async def worker_nametag(worker_id: str, _: dict = Depends(require_admin)):
