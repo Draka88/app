@@ -2243,7 +2243,6 @@ def _build_nametag_pdf(workers: list, template: str = "nametag") -> bytes:
                         c.drawString(tx, y + ch - 72, w["job_role"][:22])
                     c.setFont("Helvetica-Oblique", 7)
                     c.setFillColorRGB(0.55, 0.55, 0.6)
-                    c.drawString(tx, y + 14, "Supervisor scans this = +1 box")
                     idx += 1
             c.showPage()
         c.save()
@@ -2308,9 +2307,6 @@ def _build_nametag_pdf(workers: list, template: str = "nametag") -> bytes:
                 c.setFont("Helvetica", 9)
                 c.setFillColorRGB(0.4, 0.4, 0.4)
                 c.drawString(text_x, y + cell_h - 44 * mm, f"ID: {_emp(w)}")
-                c.setFont("Helvetica-Oblique", 8)
-                c.setFillColorRGB(0.5, 0.5, 0.5)
-                c.drawString(text_x, y + 8 * mm, "Supervisor scans this tag = +1 box")
                 idx += 1
         c.showPage()
     c.save()
