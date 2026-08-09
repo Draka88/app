@@ -124,6 +124,33 @@ export default function AdminQRCodes() {
     } finally { setBusy(false); }
   };
 
+  const downloadZip = async () => {
+    if (selected.size === 0) return toast.error("Select at least one worker");
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/workers/qr-codes/zip`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("bw_token") || ""}`,
+        },
+        body: JSON.stringify({ worker_ids: Array.from(selected), scale: 10, border: 2 }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = `boxwise_qr_pngs_${selected.size}workers.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`ZIP with ${selected.size} PNG${selected.size === 1 ? "" : "s"} ready`);
+    } catch (e) {
+      toast.error("Failed to generate ZIP");
+    } finally { setBusy(false); }
+  };
+
   return (
     <Layout>
       <div className="mb-6">
@@ -244,6 +271,19 @@ export default function AdminQRCodes() {
             >
               {busy ? "…" : "⎙ Print now"}
             </button>
+            <div className="border-t border-zinc-200 pt-3">
+              <button
+                onClick={downloadZip}
+                disabled={busy || selected.size === 0}
+                className="btn-outline-ink w-full py-3 text-sm border-zinc-950"
+                data-testid="qr-zip-btn"
+              >
+                {busy ? "…" : "🗜 Download PNG zip"}
+              </button>
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500 mt-2 text-center">
+                One PNG per worker + <code className="font-mono-data">index.csv</code>
+              </div>
+            </div>
             <div className="text-[11px] text-zinc-500 leading-relaxed">
               QR content is <code className="font-mono-data">BW-W:&lt;worker_id&gt;</code> so it works with the Scan Station out of the box. Print on plain A4 or Avery labels (sticker template) — landscape mode is not required.
             </div>

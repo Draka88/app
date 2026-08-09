@@ -2338,6 +2338,53 @@ async def bulk_worker_qr(body: QrCodesIn, _: dict = Depends(require_admin)):
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
+class QrZipIn(BaseModel):
+    worker_ids: Optional[List[str]] = None
+    scale: int = Field(default=10, ge=4, le=30)   # px per QR module
+    border: int = Field(default=2, ge=0, le=8)
+
+def _slug(s: str) -> str:
+    keep = [ch if ch.isalnum() else "_" for ch in (s or "").strip()]
+    out = "".join(keep).strip("_") or "worker"
+    return out[:60]
+
+@api.post("/workers/qr-codes/zip")
+async def bulk_worker_qr_zip(body: QrZipIn, _: dict = Depends(require_admin)):
+    """Return a ZIP containing one PNG per worker with just the QR image."""
+    import segno
+    import zipfile
+    q = {"role": "worker"}
+    if body.worker_ids:
+        q["id"] = {"$in": body.worker_ids}
+    workers = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(2000)
+    if not workers:
+        raise HTTPException(status_code=404, detail="No workers to print")
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+        used = set()
+        for w in workers:
+            qr = segno.make(f"BW-W:{w['id']}", error="M")
+            png_buf = io.BytesIO()
+            qr.save(png_buf, kind="png", scale=body.scale, border=body.border, dark="#09090b", light="#ffffff")
+            base = f"{w.get('employee_id') or 'EMP'}_{_slug(w['name'])}"
+            name = f"{base}.png"
+            n = 2
+            while name in used:
+                name = f"{base}_{n}.png"; n += 1
+            used.add(name)
+            zf.writestr(name, png_buf.getvalue())
+        # Index CSV so admin knows what's in the zip
+        rows = ["employee_id,name,job_role,filename"]
+        for w in workers:
+            rows.append(f"{w.get('employee_id') or ''},{w['name']},{(w.get('job_role') or '')},{w.get('employee_id') or 'EMP'}_{_slug(w['name'])}.png")
+        zf.writestr("index.csv", "\n".join(rows))
+    fname = f"boxwise_qr_pngs_{len(workers)}workers.zip"
+    return StreamingResponse(
+        io.BytesIO(zbuf.getvalue()),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
 @api.get("/workers/{worker_id}/nametag")
 async def worker_nametag(worker_id: str, _: dict = Depends(require_admin)):
     w = await db.users.find_one({"id": worker_id, "role": "worker"}, {"_id": 0, "password_hash": 0})
