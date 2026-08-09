@@ -508,6 +508,44 @@ async def set_rate(body: RateIn, _: dict = Depends(require_admin)):
     )
     return {"rate": float(body.rate)}
 
+# ---------- Brand color (used by QR codes on nametags / stickers / cards / PNGs) ----------
+import re as _re
+_HEX_RE = _re.compile(r"^#?([0-9a-fA-F]{6})$")
+
+def _hex_to_rgb01(hx: str):
+    m = _HEX_RE.match((hx or "").strip())
+    if not m:
+        return (0.036, 0.036, 0.043)   # zinc-950 fallback
+    h = m.group(1)
+    return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0)
+
+def _hex_norm(hx: str) -> str:
+    m = _HEX_RE.match((hx or "").strip())
+    return "#" + m.group(1).lower() if m else "#09090b"
+
+async def _get_brand_color() -> str:
+    doc = await db.settings.find_one({"key": "brand_color"})
+    return doc.get("value") if doc and doc.get("value") else "#09090b"
+
+class BrandIn(BaseModel):
+    color: str = Field(min_length=4, max_length=8)
+
+@api.get("/settings/brand")
+async def get_brand(_: dict = Depends(get_current_user)):
+    return {"color": await _get_brand_color()}
+
+@api.put("/settings/brand")
+async def set_brand(body: BrandIn, _: dict = Depends(require_admin)):
+    if not _HEX_RE.match(body.color.strip()):
+        raise HTTPException(status_code=400, detail="Colour must be a #RRGGBB hex value")
+    color = _hex_norm(body.color)
+    await db.settings.update_one(
+        {"key": "brand_color"},
+        {"$set": {"key": "brand_color", "value": color, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+    return {"color": color}
+
 # ---------- Pay method configs (per worker, per day) ----------
 @api.get("/pay-configs")
 async def list_pay_configs(
@@ -2150,19 +2188,21 @@ async def payroll_xlsx(period: str = "week", key: Optional[str] = None, _: dict 
     return _xlsx_response(wb, f"payroll_{k}.xlsx")
 
 # ---------- Worker QR nametags ----------
-def _draw_qr(c, data: str, x, y, size):
-    """Draw a QR code at (x, y) with given size on ReportLab canvas."""
+def _draw_qr(c, data: str, x, y, size, color_hex: str = "#09090b"):
+    """Draw a QR code at (x, y) with given size on ReportLab canvas.
+    color_hex controls the module (dark) colour so the code can match a brand palette."""
     from reportlab.graphics.barcode.qr import QrCodeWidget
     from reportlab.graphics.shapes import Drawing
     from reportlab.graphics import renderPDF
-    qr = QrCodeWidget(data, barLevel="M")
+    from reportlab.lib.colors import HexColor
+    qr = QrCodeWidget(data, barLevel="M", barFillColor=HexColor(_hex_norm(color_hex)))
     b = qr.getBounds()
     qw = b[2] - b[0]; qh = b[3] - b[1]
     d = Drawing(size, size, transform=[size / qw, 0, 0, size / qh, 0, 0])
     d.add(qr)
     renderPDF.draw(d, c, x, y)
 
-def _build_nametag_pdf(workers: list, template: str = "nametag") -> bytes:
+def _build_nametag_pdf(workers: list, template: str = "nametag", brand_color: str = "#09090b") -> bytes:
     """Available templates:
       - nametag   : 2×4 large printable badges (default, existing look)
       - sticker   : 3×10 Avery-style stickers (30 per page) — small QR + name + emp id
@@ -2192,7 +2232,7 @@ def _build_nametag_pdf(workers: list, template: str = "nametag") -> bytes:
                     c.setStrokeColorRGB(0.85, 0.85, 0.85); c.setLineWidth(0.4)
                     c.rect(x + 2, y + 2, cw - 4, ch - 4)
                     qs = ch - 8
-                    _draw_qr(c, f"BW-W:{w['id']}", x + 4, y + 4, qs)
+                    _draw_qr(c, f"BW-W:{w['id']}", x + 4, y + 4, qs, color_hex=brand_color)
                     tx = x + qs + 8
                     c.setFillColorRGB(0, 0, 0)
                     c.setFont("Helvetica-Bold", 10)
@@ -2230,7 +2270,7 @@ def _build_nametag_pdf(workers: list, template: str = "nametag") -> bytes:
                     c.setFont("Helvetica-Bold", 9)
                     c.drawString(x + 10, y + ch - 16, "BOXWISE · WORKER")
                     # QR on left inside card
-                    _draw_qr(c, f"BW-W:{w['id']}", x + 10, y + 12, ch - 40)
+                    _draw_qr(c, f"BW-W:{w['id']}", x + 10, y + 12, ch - 40, color_hex=brand_color)
                     # Text
                     tx = x + 10 + (ch - 40) + 8
                     c.setFillColorRGB(1, 1, 1)
@@ -2295,7 +2335,7 @@ def _build_nametag_pdf(workers: list, template: str = "nametag") -> bytes:
                 c.setFont("Helvetica-Bold", 8)
                 c.drawString(x + 6, y + cell_h - 12, "BOXWISE · WORKER ID")
                 target = min(cell_w * 0.42, cell_h * 0.55)
-                _draw_qr(c, f"BW-W:{w['id']}", x + 8 * mm, y + 8 * mm, target)
+                _draw_qr(c, f"BW-W:{w['id']}", x + 8 * mm, y + 8 * mm, target, color_hex=brand_color)
                 text_x = x + 8 * mm + target + 6 * mm
                 c.setFont("Helvetica-Bold", 20)
                 c.setFillColorRGB(0, 0, 0)
@@ -2326,7 +2366,8 @@ async def bulk_worker_qr(body: QrCodesIn, _: dict = Depends(require_admin)):
     workers = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(2000)
     if not workers:
         raise HTTPException(status_code=404, detail="No workers to print")
-    pdf = _build_nametag_pdf(workers, template=body.template)
+    brand = await _get_brand_color()
+    pdf = _build_nametag_pdf(workers, template=body.template, brand_color=brand)
     fname = f"boxwise_qr_{body.template}_{len(workers)}workers.pdf"
     return StreamingResponse(
         io.BytesIO(pdf),
@@ -2355,13 +2396,14 @@ async def bulk_worker_qr_zip(body: QrZipIn, _: dict = Depends(require_admin)):
     workers = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(2000)
     if not workers:
         raise HTTPException(status_code=404, detail="No workers to print")
+    brand = _hex_norm(await _get_brand_color())
     zbuf = io.BytesIO()
     with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zf:
         used = set()
         for w in workers:
             qr = segno.make(f"BW-W:{w['id']}", error="M")
             png_buf = io.BytesIO()
-            qr.save(png_buf, kind="png", scale=body.scale, border=body.border, dark="#09090b", light="#ffffff")
+            qr.save(png_buf, kind="png", scale=body.scale, border=body.border, dark=brand, light="#ffffff")
             base = f"{w.get('employee_id') or 'EMP'}_{_slug(w['name'])}"
             name = f"{base}.png"
             n = 2
@@ -2386,7 +2428,8 @@ async def worker_nametag(worker_id: str, _: dict = Depends(require_admin)):
     w = await db.users.find_one({"id": worker_id, "role": "worker"}, {"_id": 0, "password_hash": 0})
     if not w:
         raise HTTPException(status_code=404, detail="Worker not found")
-    pdf = _build_nametag_pdf([w])
+    brand = await _get_brand_color()
+    pdf = _build_nametag_pdf([w], brand_color=brand)
     filename = f"nametag_{w['name'].replace(' ', '_')}.pdf"
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
@@ -2396,7 +2439,8 @@ async def worker_nametags(_: dict = Depends(require_admin)):
     workers = await db.users.find({"role": "worker"}, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(1000)
     if not workers:
         raise HTTPException(status_code=404, detail="No workers to print")
-    pdf = _build_nametag_pdf(workers)
+    brand = await _get_brand_color()
+    pdf = _build_nametag_pdf(workers, brand_color=brand)
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf",
                              headers={"Content-Disposition": 'attachment; filename="worker_nametags.pdf"'})
 

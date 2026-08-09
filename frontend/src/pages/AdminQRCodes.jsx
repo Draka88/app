@@ -36,16 +36,47 @@ export default function AdminQRCodes() {
   const [template, setTemplate] = useState("nametag");
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
+  const [brand, setBrand] = useState("#09090b");
+  const [brandDraft, setBrandDraft] = useState("#09090b");
+  const [savingBrand, setSavingBrand] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const { data } = await api.get("/workers");
-      setWorkers(data || []);
-      setSelected(new Set((data || []).map((w) => w.id))); // default: all selected
+      const [ws, b] = await Promise.all([
+        api.get("/workers"),
+        api.get("/settings/brand"),
+      ]);
+      setWorkers(ws.data || []);
+      setSelected(new Set((ws.data || []).map((w) => w.id)));
+      const color = b.data?.color || "#09090b";
+      setBrand(color); setBrandDraft(color);
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const saveBrand = async () => {
+    const v = (brandDraft || "").trim();
+    if (!/^#?[0-9a-fA-F]{6}$/.test(v)) return toast.error("Enter a valid #RRGGBB hex colour");
+    const color = v.startsWith("#") ? v.toLowerCase() : `#${v.toLowerCase()}`;
+    setSavingBrand(true);
+    try {
+      const { data } = await api.put("/settings/brand", { color });
+      setBrand(data.color); setBrandDraft(data.color);
+      toast.success("Brand colour saved. Newly generated QR codes will use it.");
+    } catch (e) {
+      toast.error(formatApiError(e.response?.data?.detail));
+    } finally { setSavingBrand(false); }
+  };
+
+  const presetColors = [
+    ["#09090b", "Zinc black"],
+    ["#1e40af", "Boxwise blue"],
+    ["#166534", "Forest green"],
+    ["#b91c1c", "Signal red"],
+    ["#7c3aed", "Ultra violet"],
+    ["#eab308", "Boxwise gold"],
+  ];
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();
@@ -161,6 +192,70 @@ export default function AdminQRCodes() {
         <p className="text-zinc-500 mt-2 text-sm max-w-2xl">
           Generate printable QR codes for every worker so supervisors can scan them. Pick a template, choose which workers to include, then download or print.
         </p>
+      </div>
+
+      {/* Brand colour */}
+      <div className="card-sharp p-5 mb-6" data-testid="brand-color-panel">
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+          <div>
+            <h2 className="font-heading text-xl">Brand colour</h2>
+            <p className="text-xs text-zinc-500">Used for QR modules on every newly generated PDF and PNG. High contrast against white is best.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="border-2 border-zinc-900 w-12 h-12" style={{ background: brand }} title={`Saved: ${brand}`} data-testid="brand-saved-swatch" />
+            <div className="text-xs">
+              <div className="font-heading text-[10px] tracking-widest text-zinc-500">SAVED</div>
+              <div className="font-mono-data text-sm">{brand}</div>
+            </div>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div>
+            <label className="block font-heading text-xs mb-1 text-zinc-700">Hex</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="color"
+                value={/^#[0-9a-fA-F]{6}$/.test(brandDraft) ? brandDraft : "#09090b"}
+                onChange={(e) => setBrandDraft(e.target.value)}
+                className="h-11 w-16 border-2 border-zinc-900 p-0 cursor-pointer"
+                data-testid="brand-color-picker"
+              />
+              <input
+                type="text"
+                value={brandDraft}
+                onChange={(e) => setBrandDraft(e.target.value)}
+                placeholder="#09090b"
+                className="input-sharp font-mono-data flex-1"
+                data-testid="brand-color-input"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block font-heading text-xs mb-1 text-zinc-700">Presets</label>
+            <div className="flex flex-wrap gap-1.5">
+              {presetColors.map(([hex, label]) => (
+                <button
+                  key={hex}
+                  title={`${label} · ${hex}`}
+                  onClick={() => setBrandDraft(hex)}
+                  className={`w-8 h-8 border-2 ${brandDraft.toLowerCase() === hex ? "border-yellow-500 ring-2 ring-yellow-500" : "border-zinc-900"}`}
+                  style={{ background: hex }}
+                  data-testid={`brand-preset-${hex.slice(1)}`}
+                />
+              ))}
+            </div>
+          </div>
+          <div>
+            <button
+              onClick={saveBrand}
+              disabled={savingBrand}
+              className="btn-yellow w-full py-3 text-sm"
+              data-testid="brand-save-btn"
+            >
+              {savingBrand ? "…" : "Save brand colour →"}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Template picker */}
