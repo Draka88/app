@@ -1292,6 +1292,33 @@ async def delete_supervisor_scan(scan_id: str, reason: Optional[str] = None, use
     await db.reports.delete_one({"id": scan_id})
     return {"ok": True, "scan_id": scan_id}
 
+# ---------- Duplicate-scan review queue ----------
+@api.get("/scans/duplicates")
+async def list_scan_duplicates(
+    only_unreviewed: bool = True,
+    limit: int = 200,
+    _: dict = Depends(require_admin),
+):
+    q = {"reviewed_at": None} if only_unreviewed else {}
+    rows = await db.scan_duplicates.find(q, {"_id": 0}).sort("attempt_at", -1).to_list(min(max(limit, 1), 1000))
+    # Enrich with whether the original scan still exists (admin may have deleted it already)
+    ids = [r.get("original_scan_id") for r in rows if r.get("original_scan_id")]
+    existing_ids = set(await db.reports.distinct("id", {"id": {"$in": ids}})) if ids else set()
+    for r in rows:
+        r["original_scan_exists"] = r.get("original_scan_id") in existing_ids
+    return rows
+
+@api.post("/scans/duplicates/{dup_id}/dismiss")
+async def dismiss_scan_duplicate(dup_id: str, user: dict = Depends(require_admin)):
+    now = datetime.now(timezone.utc)
+    res = await db.scan_duplicates.update_one(
+        {"id": dup_id, "reviewed_at": None},
+        {"$set": {"reviewed_at": now.isoformat(), "reviewed_by": user["email"]}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Duplicate record not found or already reviewed")
+    return {"ok": True}
+
 # ---------- Legacy report create ----------
 @api.post("/reports", response_model=BoxReportOut)
 async def create_report(body: BoxReportIn, user: dict = Depends(get_current_user)):
@@ -1316,9 +1343,13 @@ async def create_report(body: BoxReportIn, user: dict = Depends(get_current_user
     return doc
 
 # ---------- Barcode scans ----------
+DUPLICATE_WINDOW_SECONDS = 10
+
 @api.post("/scans/for-worker")
 async def create_worker_scan(body: dict, user: dict = Depends(require_admin)):
-    """Supervisor scans a worker's QR name tag. Each scan = +1 box for that worker. No dedupe."""
+    """Supervisor scans a worker's QR name tag. Each scan = +1 box for that worker.
+    A duplicate (same supervisor + same worker within DUPLICATE_WINDOW_SECONDS) is rejected
+    and logged to `scan_duplicates` for admin review."""
     worker_qr = (body.get("worker_id") or body.get("barcode") or "").strip()
     if not worker_qr:
         raise HTTPException(status_code=400, detail="worker_id (or QR barcode) is required")
@@ -1331,15 +1362,39 @@ async def create_worker_scan(body: dict, user: dict = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Worker not found for this QR code")
     now = datetime.now(timezone.utc)
     today = date.today()
-    two_s_ago = (now - timedelta(seconds=2)).isoformat()
-    burst = await db.reports.find_one({
+    window_start = (now - timedelta(seconds=DUPLICATE_WINDOW_SECONDS)).isoformat()
+    prev = await db.reports.find_one({
         "worker_id": worker["id"],
         "supervisor_id": user["id"],
         "source": "supervisor_scan",
-        "created_at": {"$gte": two_s_ago},
-    })
-    if burst:
-        raise HTTPException(status_code=429, detail="Slow down — same worker scanned less than 2s ago")
+        "created_at": {"$gte": window_start},
+    }, sort=[("created_at", -1)])
+    if prev:
+        await db.scan_duplicates.insert_one({
+            "id": str(uuid.uuid4()),
+            "worker_id": worker["id"],
+            "worker_name": worker["name"],
+            "worker_employee_id": worker.get("employee_id"),
+            "supervisor_id": user["id"],
+            "supervisor_name": user["name"],
+            "supervisor_email": user["email"],
+            "original_scan_id": prev["id"],
+            "original_scan_at": prev["created_at"],
+            "attempt_at": now.isoformat(),
+            "gap_seconds": max(0.0, round((now - datetime.fromisoformat(prev["created_at"])).total_seconds(), 2)),
+            "reviewed_at": None,
+            "reviewed_by": None,
+        })
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"Duplicate scan — {worker['name']} was already scanned by you less than {DUPLICATE_WINDOW_SECONDS}s ago.",
+                "worker_name": worker["name"],
+                "original_scan_id": prev["id"],
+                "original_scan_at": prev["created_at"],
+                "window_seconds": DUPLICATE_WINDOW_SECONDS,
+            },
+        )
     doc = {
         "id": str(uuid.uuid4()),
         "worker_id": worker["id"],

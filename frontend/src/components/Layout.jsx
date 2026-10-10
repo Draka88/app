@@ -28,6 +28,7 @@ export default function Layout({ children }) {
                   <NavLink to="/" active={loc.pathname === "/"} label="Scan" testid="nav-scan" />
                   <NavLink to="/payroll" active={loc.pathname === "/payroll"} label="Payroll" testid="nav-payroll" />
                   <NavLink to="/reports" active={loc.pathname === "/reports"} label="Reports" testid="nav-reports" />
+                  <NavLink to="/duplicates" active={loc.pathname === "/duplicates"} label="Duplicates" testid="nav-duplicates" />
                   <NavLink to="/attendance" active={loc.pathname === "/attendance"} label="Attendance" testid="nav-attendance" />
                   <NavLink to="/workers" active={loc.pathname === "/workers"} label="Workers" testid="nav-workers" />
                   <NavLink to="/qr-codes" active={loc.pathname === "/qr-codes"} label="QR Codes" testid="nav-qr" />
