@@ -16,7 +16,6 @@
     "react-scripts": "5.0.1",
     "recharts": "^2.12.0",
     "sonner": "^1.4.0",
-    "tailwindcss-animate": "^1.0.7",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
@@ -24,5 +23,20 @@
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "tailwindcss-animate": "^1.0.7"
   }
 }
