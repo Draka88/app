@@ -57,8 +57,8 @@ app = FastAPI(title="Boxwise Payroll API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",                # Untuk development lokal
-        "https://workers-box-system.vercel.app",  # URL Vercel Anda
+        "http://localhost:3000",
+        "https://workers-box-system-jqro.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
