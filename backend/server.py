@@ -26,6 +26,17 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
+app = FastAPI(title="Boxwise Payroll API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+api = APIRouter(prefix="/api")
 # ---------- DB ----------
 mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
@@ -445,3 +456,5 @@ async def create_worker(body: WorkerCreate, _: dict = Depends(require_admin)):
     emp_id = (body.employee_id or "").strip()
     if emp_id:
         clash = await db.users
+
+app.include_router(api)
