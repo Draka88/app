@@ -1,15 +1,7 @@
 {
-  "framework": "create-react-app",
   "buildCommand": "npm run build",
-  "outputDirectory": "build",
   "installCommand": "npm install --legacy-peer-deps",
-  "engines": {
-    "node": "18.x"
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
-    }
-  ]
+  "outputDirectory": "build",
+  "framework": null,
+  "cleanUrls": true
 }
